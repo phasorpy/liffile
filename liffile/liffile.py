@@ -34,14 +34,12 @@
 Liffile is a Python library to read image and metadata from Leica image files:
 LIF (Leica Image File), LOF (Leica Object File), XLIF (XML Image File),
 XLCF (XML Collection File), XLEF (XML Experiment File), and LIFEXT (Leica
-Image File Extension).
-
-These files are written by LAS X software to store collections of images
-and metadata from microscopy experiments.
+Image File Extension). These files are written by LAS X software to store
+collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.28
+:Version: 2025.11.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -63,16 +61,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.8.2
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.9.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.20 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.10.1 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
 
 Revisions
 ---------
+
+2025.11.8
+
+- Add option to find other LifImageSeries attributes than path.
+- Return UniqueID in LifImage.attrs.
+- Factor out BinaryFile base class.
 
 2025.9.28
 
@@ -193,6 +197,7 @@ Coordinates:
   * X        (X) float64... 0.0005564
 Attributes...
     path:           FLIM_testdata.lif/sample1_slice1/FLIM Compressed/Fast Flim
+    UniqueID:       694efd02-95a9-436e-0fa6-f146120b1e15
     F16:            {'Name': 'F16',...
     TileScanInfo:   {'Tile': {'FieldX': 0,...
     ViewerScaling:  {'ChannelScalingInfo': {...
@@ -205,7 +210,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.9.28'
+__version__ = '2025.11.8'
 
 __all__ = [
     '__version__',
@@ -223,6 +228,7 @@ __all__ = [
 ]
 
 import enum
+import io
 import logging
 import math
 import os
@@ -362,16 +368,165 @@ class LifFileType(enum.Enum):
     """File containing optional image data for LIF."""
 
 
+class BinaryFile:
+    """Binary file.
+
+    Parameters:
+        file:
+            File name or seekable binary stream.
+        mode:
+            File open mode if `file` is a file name.
+            The default is 'r'. Files are always opened in binary mode.
+
+    Raises:
+        ValueError:
+            Invalid file name, extension, or stream.
+            File is not a binary or seekable stream.
+
+    """
+
+    _fh: IO[bytes]
+    _path: str  # absolute path of file
+    _name: str  # name of file or handle
+    _close: bool  # file needs to be closed
+    _closed: bool  # file is closed
+    _ext: set[str] = set()  # valid extensions, empty for any
+
+    def __init__(
+        self,
+        file: str | os.PathLike[str] | IO[bytes],
+        /,
+        *,
+        mode: Literal['r', 'r+'] | None = None,
+    ) -> None:
+
+        self._path = ''
+        self._name = 'Unnamed'
+        self._close = False
+        self._closed = False
+
+        if isinstance(file, (str, os.PathLike)):
+            ext = os.path.splitext(file)[-1].lower()
+            if self._ext and ext not in self._ext:
+                raise ValueError(
+                    f'invalid file extension: {ext!r} not in {self._ext!r}'
+                )
+            if mode is None:
+                mode = 'r'
+            else:
+                if mode[-1:] == 'b':
+                    mode = mode[:-1]  # type: ignore[assignment]
+                if mode not in {'r', 'r+'}:
+                    raise ValueError(f'invalid {mode=!r}')
+            self._path = os.path.abspath(file)
+            self._close = True
+            self._fh = open(self._path, mode + 'b')
+
+        elif hasattr(file, 'seek'):
+            # binary stream: open file, BytesIO, fsspec LocalFileOpener
+            if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
+                raise ValueError(f'{file!r} is not open in binary mode')
+
+            self._fh = file
+            try:
+                self._fh.tell()
+            except Exception as exc:
+                raise ValueError(f'{file!r} is not seekable') from exc
+            if hasattr(file, 'path'):
+                self._path = os.path.normpath(file.path)
+            elif hasattr(file, 'name'):
+                self._path = os.path.normpath(file.name)
+
+        elif hasattr(file, 'open'):
+            # fsspec OpenFile
+            self._fh = file.open()
+            self._close = True
+            try:
+                self._fh.tell()
+            except Exception as exc:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                raise ValueError(f'{file!r} is not seekable') from exc
+            if hasattr(file, 'path'):
+                self._path = os.path.normpath(file.path)
+
+        else:
+            raise ValueError(f'cannot handle {type(file)=}')
+
+        if hasattr(file, 'name') and file.name:
+            self._name = os.path.basename(file.name)
+        elif self._path:
+            self._name = os.path.basename(self._path)
+        elif isinstance(file, io.BytesIO):
+            self._name = 'BytesIO'
+        # else:
+        #     self._name = f'{type(file)}'
+
+    @property
+    def filehandle(self) -> IO[bytes]:
+        """File handle."""
+        return self._fh
+
+    @property
+    def filepath(self) -> str:
+        """Path to file."""
+        return self._path
+
+    @property
+    def filename(self) -> str:
+        """Name of file or empty if binary stream."""
+        return os.path.basename(self._path)
+
+    @property
+    def dirname(self) -> str:
+        """Directory containing file or empty if binary stream."""
+        return os.path.dirname(self._path)
+
+    @property
+    def name(self) -> str:
+        """Display name of file."""
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+
+    @property
+    def closed(self) -> bool:
+        """File is closed."""
+        return self._closed
+
+    def close(self) -> None:
+        """Close file."""
+        if self._close:
+            try:
+                self._closed = True
+                self._fh.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> BinaryFile:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        if self._name:
+            return f'<{self.__class__.__name__} {self._name!r}>'
+        return f'<{self.__class__.__name__}>'
+
+
 @final
-class LifFile:
+class LifFile(BinaryFile):
     """Leica image file (LIF, LOF, XLIF, XLEF, XLCF, or LIFEXT).
 
     ``LifFile`` instances are not thread-safe. All attributes are read-only.
 
     ``LifFile`` instances must be closed with :py:meth:`LifFile.close`,
     which is automatically called when using the 'with' context manager.
-
-    All properties are read-only.
 
     Parameters:
         file:
@@ -395,9 +550,6 @@ class LifFile:
     version: int
     """File version."""
 
-    name: str
-    """Name of file from XML header."""
-
     uuid: str | None
     """Unique identifier of file, if any."""
 
@@ -407,9 +559,6 @@ class LifFile:
     memory_blocks: dict[str, LifMemoryBlock]
     """Object memory blocks."""
 
-    _fh: IO[bytes]
-    _path: str  # absolute path of file
-    _close: bool  # file needs to be closed
     _squeeze: bool  # remove dimensions of length one from images
     _xml_header: tuple[int, int]  # byte offset and size of XML header
     _parent: LifFile | None  # parent file, if any
@@ -423,29 +572,12 @@ class LifFile:
         mode: Literal['r', 'r+'] | None = None,
         _parent: LifFile | None = None,
     ) -> None:
-        if isinstance(file, (str, os.PathLike)):
-            if mode is None:
-                mode = 'r'
-            else:
-                if mode[-1:] == 'b':
-                    mode = mode[:-1]  # type: ignore[assignment]
-                if mode not in {'r', 'r+'}:
-                    raise ValueError(f'invalid {mode=!r}')
-            self._path = os.path.abspath(file)
-            self._close = True
-            self._fh = open(self._path, mode + 'b')
-        elif hasattr(file, 'seek'):
-            self._path = ''
-            self._close = False
-            self._fh = file
-        else:
-            raise ValueError(f'cannot open file of type {type(file)}')
+        super().__init__(file, mode=mode)
 
         self._parent = _parent
         self._squeeze = bool(squeeze)
         self.type = LifFileType.LIF
         self.version = 0
-        self.name = ''
         self.uuid = None
         self.memory_blocks = {}
         self._xml_header = (0, 0)
@@ -605,21 +737,6 @@ class LifFile:
             raise ValueError(f'unsupported file type={self.type!r}')
 
     @property
-    def filehandle(self) -> IO[bytes]:
-        """File handle."""
-        return self._fh
-
-    @property
-    def filename(self) -> str:
-        """Name of file or empty if binary stream."""
-        return os.path.basename(self._path)
-
-    @property
-    def dirname(self) -> str:
-        """Directory containing file or empty if binary stream."""
-        return os.path.dirname(self._path)
-
-    @property
     def datetime(self) -> datetime | None:
         """File creation date from XML header."""
         element = self.xml_element.find('./Element/Data/Experiment/TimeStamp')
@@ -688,27 +805,10 @@ class LifFile:
         if self._close:
             for child in self.children:
                 child.close()
-            try:
-                self._fh.close()
-            except Exception:
-                pass
+        super().close()
 
     def __enter__(self) -> LifFile:
         return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
-
-    def __repr__(self) -> str:
-        if self._path:
-            name = self.filename
-        elif hasattr(self._fh, 'name') and self._fh.name:
-            name = os.path.basename(self._fh.name)
-        else:
-            name = self.name
-        return (
-            f'<{self.__class__.__name__} {name!r} images={len(self.images)}>'
-        )
 
     def __str__(self) -> str:
         return indent(
@@ -739,7 +839,7 @@ class LifFile:
 class LifImageABC(ABC):
     """Base class for :py:class:`LifImage` and :py:class:`LifFlimImage`.
 
-    All properties are read-only.
+    All attributes are read-only.
 
     Parameters:
         parent:
@@ -1212,7 +1312,7 @@ class LifImage(LifImageABC):
         path = self.path
         if self.parent.type == LifFileType.LIF:
             path = self.parent.name + '/' + path
-        attrs = {'path': path}
+        attrs = {'path': path, 'UniqueID': self.uuid}
         attrs.update(
             (attach.attrib['Name'], xml2dict(attach)['Attachment'])
             for attach in self.xml_element.findall('./Data/Image/Attachment')
@@ -1377,6 +1477,7 @@ class LifFlimImage(LifImageABC):
         attrs = xml2dict(rawdata, exclude={'Dimensions', 'Channels'})
         return {
             'path': self.parent.name + '/' + self.path,
+            'UniqueID': self.uuid,
             'RawData': attrs['RawData'],
         }
 
@@ -1536,13 +1637,21 @@ class LifImageSeries(Sequence[LifImageABC]):
                 yield from LifImageSeries._image_iter(element, path)
 
     def find(
-        self, key: str, /, *, flags: int = re.IGNORECASE, default: Any = None
+        self,
+        key: str,
+        /,
+        *,
+        attr: str = 'path',
+        flags: int = re.IGNORECASE,
+        default: Any = None,
     ) -> LifImageABC | None:
         """Return first image with matching path pattern, if any.
 
         Parameters:
             key:
-                Regular expression pattern to match LifImage.path.
+                Regular expression pattern to match str of LifImage attribute.
+            attr:
+                LifImage attribute to match against (default: 'path').
             flags:
                 Regular expression flags.
             default:
@@ -1551,18 +1660,26 @@ class LifImageSeries(Sequence[LifImageABC]):
         """
         pattern = re.compile(key, flags=flags)
         for image in self._images.values():
-            if pattern.search(image.path) is not None:
+            value = str(getattr(image, attr, ''))
+            if pattern.search(value) is not None:
                 return image
         return default  # type: ignore[no-any-return]
 
     def findall(
-        self, key: str, /, *, flags: int = re.IGNORECASE
+        self,
+        key: str,
+        /,
+        *,
+        attr: str = 'path',
+        flags: int = re.IGNORECASE,
     ) -> tuple[LifImageABC, ...]:
         """Return all images with matching path pattern.
 
         Parameters:
             key:
-                Regular expression pattern to match LifImage.path.
+                Regular expression pattern to match str of LifImage attribute.
+            attr:
+                LifImage attribute to match against (default: 'path').
             flags:
                 Regular expression flags.
 
@@ -1570,7 +1687,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         pattern = re.compile(key, flags=flags)
         images = []
         for image in self._images.values():
-            if pattern.search(image.path) is not None:
+            value = str(getattr(image, attr, ''))
+            if pattern.search(value) is not None:
                 images.append(image)
         return tuple(images)
 
@@ -1928,26 +2046,37 @@ class LifChannel:
 
     dtype: numpy.dtype[Any]
     """Numpy dtype from data_type and resolution."""
+
     data_type: int
     """Data type, integer (0) or float (1)."""
+
     channel_tag: int
     """Gray (0), Red (1), Green (2), or Blue (3)."""
+
     resolution: float
     """Bits per pixel."""
+
     name_of_measured_quantity: str
     """Name of measured quantity."""
+
     min: float
     """Physical value of lowest gray value."""
+
     max: float
     """Physical value of highest gray value."""
+
     unit: str
     """Physical unit."""
+
     lut_name: str
     """Name of Look Up Table."""
+
     is_lut_inverted: bool
     """Look Up Table is inverted."""
+
     bytes_inc: int
     """Distance from the first channel in bytes."""
+
     bit_inc: int
     """Bit distance."""
 
@@ -1958,18 +2087,25 @@ class LifDimension:
 
     label: str
     """Label of dimension."""
+
     dim_id: int
     """Type of dimension."""
+
     number_elements: int
     """Number of elements."""
+
     origin: float
     """Physical position of first element."""
+
     length: float
     """Physical length from first to last element."""
+
     unit: str
     """Physical unit."""
+
     bytes_inc: int
     """Distance from one element to the next."""
+
     bit_inc: int
     """Bit distance."""
 
@@ -1980,22 +2116,31 @@ class LifRawData:
 
     format: str
     """Raw data format."""
+
     voxel_size_x: float
     """Spatial dimension size in m."""
+
     voxel_size_y: float
     """Spatial dimension size in m."""
+
     voxel_size_z: float
     """Spatial dimension size in m."""
+
     clock_period: float
     """Base clock in s."""
+
     synchronization_marker_period: float
     """Clock period of the FCS counter in s."""
+
     frame_repetitions_marked: bool
     """Frames completed when number photons detected."""
+
     pixel_time: str
     """Pixel dwell time in s."""
+
     bi_directional: bool
     """Bi-directional scan."""
+
     sequential_mode: bool
     """Sequential mode."""
 
