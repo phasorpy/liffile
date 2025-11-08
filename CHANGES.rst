@@ -1,6 +1,12 @@
 Revisions
 ---------
 
+2025.11.8
+
+- Add option to find other LifImageSeries attributes than path.
+- Return UniqueID in LifImage.attrs.
+- Factor out BinaryFile base class.
+
 2025.9.28
 
 - Derive LifFileError from ValueError.
