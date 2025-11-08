@@ -7,14 +7,12 @@ Read Leica image files (LIF, LOF, XLIF, XLCF, XLEF, and LIFEXT)
 Liffile is a Python library to read image and metadata from Leica image files:
 LIF (Leica Image File), LOF (Leica Object File), XLIF (XML Image File),
 XLCF (XML Collection File), XLEF (XML Experiment File), and LIFEXT (Leica
-Image File Extension).
-
-These files are written by LAS X software to store collections of images
-and metadata from microscopy experiments.
+Image File Extension). These files are written by LAS X software to store
+collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.9.28
+:Version: 2025.11.8
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -36,16 +34,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.7, 3.14.0rc 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.3
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.8.2
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.9.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.6 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.9.20 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.10.1 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
 
 Revisions
 ---------
+
+2025.11.8
+
+- Add option to find other LifImageSeries attributes than path.
+- Return UniqueID in LifImage.attrs.
+- Factor out BinaryFile base class.
 
 2025.9.28
 
@@ -168,6 +172,7 @@ Read a FLIM lifetime image and metadata from a LIF file:
       * X        (X) float64... 0.0005564
     Attributes...
         path:           FLIM_testdata.lif/sample1_slice1/FLIM Compressed/Fast Flim
+        UniqueID:       694efd02-95a9-436e-0fa6-f146120b1e15
         F16:            {'Name': 'F16',...
         TileScanInfo:   {'Tile': {'FieldX': 0,...
         ViewerScaling:  {'ChannelScalingInfo': {...
