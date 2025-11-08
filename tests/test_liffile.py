@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.9.28
+:Version: 2025.11.8
 
 """
 
@@ -51,6 +51,11 @@ import xarray
 from numpy.testing import assert_allclose, assert_array_equal
 from xarray import DataArray
 
+try:
+    import fsspec
+except ImportError:
+    fsspec = None  # type: ignore[assignment]
+
 import liffile
 from liffile import (
     FILE_EXTENSIONS,
@@ -66,7 +71,7 @@ from liffile import (
     imread,
     xml2dict,
 )
-from liffile.liffile import case_sensitive_path
+from liffile.liffile import BinaryFile, case_sensitive_path
 
 HERE = pathlib.Path(os.path.dirname(__file__))
 DATA = HERE / 'data'
@@ -855,6 +860,215 @@ def test_version():
     assert ver in liffile.__doc__
 
 
+class TestBinaryFile:
+    """Test BinaryFile with different file-like inputs."""
+
+    def setup_method(self):
+        self.fname = os.path.normpath(DATA / 'binary.bin')
+        if not os.path.exists(self.fname):
+            pytest.skip(f'{self.fname!r} not found')
+
+    def validate(
+        self,
+        fh: BinaryFile,
+        filepath: str | None = None,
+        filename: str | None = None,
+        dirname: str | None = None,
+        name: str | None = None,
+        closed: bool = True,
+    ) -> None:
+        """Assert BinaryFile attributes."""
+        if filepath is None:
+            filepath = self.fname
+        if filename is None:
+            filename = os.path.basename(self.fname)
+        if dirname is None:
+            dirname = os.path.dirname(self.fname)
+        if name is None:
+            name = fh.filename
+
+        assert fh.filepath == filepath
+        assert fh.filename == filename
+        assert fh.dirname == dirname
+        assert fh.name == name
+        assert fh.closed is False
+        assert len(fh.filehandle.read()) == 256
+        fh.filehandle.seek(10)
+        assert fh.filehandle.tell() == 10
+        assert fh.filehandle.read(1) == b'\n'
+        fh.close()
+        assert fh.closed is closed
+
+    def test_str(self):
+        """Test BinaryFile with str path."""
+        file = self.fname
+        with BinaryFile(file) as fh:
+            self.validate(fh, closed=True)
+
+    def test_pathlib(self):
+        """Test BinaryFile with pathlib.Path."""
+        file = pathlib.Path(self.fname)
+        with BinaryFile(file) as fh:
+            self.validate(fh, closed=True)
+
+    def test_open_file(self):
+        """Test BinaryFile with open binary file."""
+        with open(self.fname, 'rb') as fh:
+            with BinaryFile(fh) as bf:
+                self.validate(bf, closed=False)
+
+    def test_bytesio(self):
+        """Test BinaryFile with BytesIO."""
+        with open(self.fname, 'rb') as fh:
+            file = io.BytesIO(fh.read())
+        with BinaryFile(file) as fh:
+            self.validate(
+                fh,
+                filepath='',
+                filename='',
+                dirname='',
+                name='BytesIO',
+                closed=False,
+            )
+
+    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
+    def test_fsspec_openfile(self):
+        """Test BinaryFile with fsspec OpenFile."""
+        file = fsspec.open(self.fname)
+        with BinaryFile(file) as fh:
+            self.validate(fh, closed=True)
+
+    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
+    def test_fsspec_localfileopener(self):
+        """Test BinaryFile with fsspec LocalFileOpener."""
+        with fsspec.open(self.fname) as file, BinaryFile(file) as fh:
+            self.validate(fh, closed=False)
+
+    def test_text_file_fails(self):
+        """Test BinaryFile with open text file fails."""
+        with open(self.fname) as fh:
+            with pytest.raises(ValueError):
+                BinaryFile(fh)
+
+    def test_file_extension_fails(self):
+        """Test BinaryFile with wrong file extension fails."""
+        ext = BinaryFile._ext
+        BinaryFile._ext = {'.lif'}
+        try:
+            with pytest.raises(ValueError):
+                BinaryFile(self.fname)
+        finally:
+            BinaryFile._ext = ext
+
+    def test_file_not_seekable(self):
+        """Test BinaryFile with non-seekable file fails."""
+
+        class File:
+            # mock file object without tell methods
+            def seek(self):
+                pass
+
+        with pytest.raises(ValueError):
+            BinaryFile(File)
+
+    def test_openfile_not_seekable(self):
+        """Test BinaryFile with non-seekable file fails."""
+
+        class File:
+            # mock fsspec OpenFile without seek/tell methods
+            @staticmethod
+            def open(*args, **kwargs):
+                return File()
+
+        with pytest.raises(ValueError):
+            BinaryFile(File)
+
+    def test_invalid_object(self):
+        """Test BinaryFile with invalid file object fails."""
+
+        class File:
+            # mock non-file object
+            pass
+
+        with pytest.raises(ValueError):
+            BinaryFile(File)
+
+    def test_invalid_mode(self):
+        """Test BinaryFile with invalid mode fails."""
+        with pytest.raises(ValueError):
+            BinaryFile(self.fname, mode='ab')
+
+
+class TestLifFile:
+    """Test LifFile with different file-like inputs."""
+
+    def setup_method(self):
+        self.fname = os.path.normpath(DATA / 'ScanModesExamples.lif')
+        if not os.path.exists(self.fname):
+            pytest.skip(f'{self.fname!r} not found')
+
+    def validate(self, lif: LifFile) -> None:
+        # assert LifFile attributes
+        assert lif.parent is None
+        assert not lif.filehandle.closed
+        assert lif.name == 'ScanModiBeispiele.lif'
+        assert lif.version == 2
+        assert lif.datetime == datetime.datetime(
+            2013, 12, 2, 8, 27, 44, tzinfo=datetime.UTC
+        )
+        assert len(lif.memory_blocks) == 240
+        assert repr(lif).startswith('<LifFile ')
+        assert lif.xml_header().startswith(
+            '<LMSDataContainerHeader Version="2">'
+        )
+
+        series = lif.images
+        str(series)
+        assert len(series) == 200
+        im = series[5]
+        str(im)
+        assert series[im.path] is im
+
+    def test_str(self):
+        """Test LifFile with str path."""
+        file = self.fname
+        with LifFile(file) as lif:
+            self.validate(lif)
+
+    def test_pathlib(self):
+        """Test LifFile with pathlib.Path."""
+        file = pathlib.Path(self.fname)
+        with LifFile(file) as lif:
+            self.validate(lif)
+
+    def test_open_file(self):
+        """Test LifFile with open binary file."""
+        with open(self.fname, 'rb') as fh:
+            with LifFile(fh) as lif:
+                self.validate(lif)
+
+    def test_bytesio(self):
+        """Test LifFile with BytesIO."""
+        with open(self.fname, 'rb') as fh:
+            file = io.BytesIO(fh.read())
+        with LifFile(file) as lif:
+            self.validate(lif)
+
+    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
+    def test_fsspec_openfile(self):
+        """Test LifFile with fsspec OpenFile."""
+        file = fsspec.open(self.fname)
+        with LifFile(file) as lif:
+            self.validate(lif)
+        file.close()
+
+    @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
+    def test_fsspec_localfileopener(self):
+        """Test LifFile with fsspec LocalFileOpener."""
+        with fsspec.open(self.fname) as file, LifFile(file) as lif:
+            self.validate(lif)
+
+
 def test_not_lif():
     """Test open non-LIF file raises exceptions."""
     with pytest.raises(LifFileError):
@@ -893,8 +1107,6 @@ def test_lif(filetype):
         if filetype is str:
             assert lif.filename == str(filename.name)
             assert lif.dirname == str(filename.parent)
-        else:
-            assert lif.filename == ''
         assert not lif.filehandle.closed
         assert lif.name == 'ScanModiBeispiele.lif'
         assert lif.version == 2
@@ -927,10 +1139,12 @@ def test_lif(filetype):
         assert len(images) == 9
         assert images[0].name == 'Lambda_496nm'
         assert images[0].parent_image is None
+        assert series.findall(images[1].uuid, attr='uuid')[0] is images[1]
 
         im = series.find('Lambda_496nm', flags=re.IGNORECASE)
         assert im is images[0]
         assert series.find('ABC', default=im) is im
+        assert series.find(im.uuid, attr='uuid') is im
 
         im = series[5]
         str(im)
@@ -1324,7 +1538,7 @@ def test_lifext():
         assert lifext.parent is parent
         assert lifext.filename == 'XYZCS.lifext'
         assert not lifext.filehandle.closed
-        assert lifext.name == ''
+        assert lifext.name == 'XYZCS.lifext'
         assert lifext.version == 1
         assert lifext.uuid is None
         assert lifext.datetime is None
