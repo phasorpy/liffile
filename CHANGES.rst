@@ -1,6 +1,11 @@
 Revisions
 ---------
 
+2025.12.12
+
+- Remove deprecated LifFile.series and xml_element_smd properties (breaking).
+- Improve code quality.
+
 2025.11.8
 
 - Add option to find other LifImageSeries attributes than path.
