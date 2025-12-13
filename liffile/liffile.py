@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.11.8
+:Version: 2025.12.12
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -61,16 +61,21 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.9, 3.14.0 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.8.2
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.3.5
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.11.11
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.10.1 (recommended)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.11.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.10.16 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.12.12 (optional)
 
 Revisions
 ---------
+
+2025.12.12
+
+- Remove deprecated LifFile.series and xml_element_smd properties (breaking).
+- Improve code quality.
 
 2025.11.8
 
@@ -210,21 +215,21 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.11.8'
+__version__ = '2025.12.12'
 
 __all__ = [
-    '__version__',
-    'imread',
-    'xml2dict',
+    'FILE_EXTENSIONS',
     'LifFile',
     'LifFileError',
     'LifFileType',
-    'LifImage',
     'LifFlimImage',
+    'LifImage',
     'LifImageABC',
     'LifImageSeries',
     'LifMemoryBlock',
-    'FILE_EXTENSIONS',
+    '__version__',
+    'imread',
+    'xml2dict',
 ]
 
 import enum
@@ -235,7 +240,6 @@ import os
 import re
 import struct
 import sys
-import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -248,7 +252,8 @@ from xml.etree import ElementTree
 
 if TYPE_CHECKING:
     from collections.abc import Container, Iterable, Iterator
-    from typing import IO, Any, Literal
+    from types import TracebackType
+    from typing import IO, Any, ClassVar, Literal, Self
 
     from numpy.typing import DTypeLike, NDArray
     from xarray import DataArray
@@ -390,7 +395,7 @@ class BinaryFile:
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
-    _ext: set[str] = set()  # valid extensions, empty for any
+    _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
     def __init__(
         self,
@@ -420,12 +425,12 @@ class BinaryFile:
                     raise ValueError(f'invalid {mode=!r}')
             self._path = os.path.abspath(file)
             self._close = True
-            self._fh = open(self._path, mode + 'b')
+            self._fh = open(self._path, mode + 'b')  # noqa: SIM115
 
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                raise ValueError(f'{file!r} is not open in binary mode')
+                raise TypeError(f'{file!r} is not open in binary mode')
 
             self._fh = file
             try:
@@ -446,7 +451,7 @@ class BinaryFile:
             except Exception as exc:
                 try:
                     self._fh.close()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 raise ValueError(f'{file!r} is not seekable') from exc
             if hasattr(file, 'path'):
@@ -494,6 +499,11 @@ class BinaryFile:
         self._name = value
 
     @property
+    def attrs(self) -> dict[str, Any]:
+        """Selected metadata as dict."""
+        return {'name': self.name, 'filepath': self.filepath}
+
+    @property
     def closed(self) -> bool:
         """File is closed."""
         return self._closed
@@ -504,13 +514,18 @@ class BinaryFile:
             try:
                 self._closed = True
                 self._fh.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
-    def __enter__(self) -> BinaryFile:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __repr__(self) -> str:
@@ -596,7 +611,7 @@ class LifFile(BinaryFile):
         }:
             try:
                 self._fh.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
     def _init(self) -> None:
@@ -630,7 +645,7 @@ class LifFile(BinaryFile):
             self.type = LifFileType.LOF
             # read memory block
             try:
-                id0, ver0, id1, ver1 = struct.unpack('<BIBI', fh.read(10))
+                id0, _ver0, id1, _ver1 = struct.unpack('<BIBI', fh.read(10))
             except Exception as exc:
                 raise LifFileError('corrupted Leica object file') from exc
             if id0 != 0x2A or id1 != 0x2A:
@@ -675,7 +690,7 @@ class LifFile(BinaryFile):
         elif xml_header.startswith('<LMSDataContainerEnhancedHeader'):
             self.type = LifFileType.LIFEXT
 
-        self.xml_element = ElementTree.fromstring(xml_header)
+        self.xml_element = ElementTree.fromstring(xml_header)  # noqa: S314
         del xml_header
 
         element = self.xml_element.find('./Element')
@@ -688,26 +703,25 @@ class LifFile(BinaryFile):
 
         try:
             self.version = int(self.xml_element.attrib['Version'])
-        except KeyError:
+        except KeyError as exc:
             if not self.type == LifFileType.LOF:
-                raise KeyError('Version attribute not found in XML')
+                raise KeyError('Version attribute not found in XML') from exc
 
         # add memory blocks
         if self.type == LifFileType.LOF:
             # LOF files only contain a single memory block without id.
             # Any id would work.
             # However, try to preserve original id from XML metadata.
-            try:
-                memory = self.xml_element.find('./Element/Memory')
-                if memory is None:
-                    raise ValueError('Memory element not found in XML')
+            memory = self.xml_element.find('./Element/Memory')
+            memblock_id: str | None
+            if memory is None:
+                # raise Memory element not found in XML
+                memblock_id = 'MemBlock_0'
+            else:
                 memblock_id = memory.get('MemoryBlockID')
                 if memblock_id is None:
-                    raise ValueError(
-                        'MemoryBlockID attribute not found in XML'
-                    )
-            except ValueError:
-                memblock_id = 'MemBlock_0'
+                    # raise MemoryBlockID attribute not found in XML
+                    memblock_id = 'MemBlock_0'
 
             memblock.id = memblock_id  # LOF memory blocks don't have id
             self.memory_blocks[memblock.id] = memblock
@@ -751,16 +765,6 @@ class LifFile(BinaryFile):
     def images(self) -> LifImageSeries:
         """Sequence of images in file."""
         return LifImageSeries(self)
-
-    @property
-    def series(self) -> LifImageSeries:
-        # kept for backward compatibility with PhasorPy 0.4
-        warnings.warn(
-            'LifFile.series is deprecated. Use LifFile.images',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.images
 
     @cached_property
     def children(self) -> tuple[LifFile, ...]:
@@ -907,11 +911,6 @@ class LifImageABC(ABC):
         """Unique identifier of image, if any."""
         return self.xml_element.attrib.get('UniqueID')
 
-    @property
-    @abstractmethod
-    def xml_element_smd(self) -> ElementTree.Element | None:
-        """SingleMoleculeDetection XML element, if any."""
-
     @cached_property
     @abstractmethod
     def dtype(self) -> numpy.dtype[Any]:
@@ -1007,7 +1006,7 @@ class LifImageABC(ABC):
         if self.parent.type in {LifFileType.LOF, LifFileType.XLIF}:
             # XLIF and LOF files contain one memory block
             return self.parent.memory_blocks[
-                tuple(self.parent.memory_blocks.keys())[0]
+                next(iter(self.parent.memory_blocks.keys()))
             ]
         memory = self.xml_element.find('./Memory')
         if memory is None:
@@ -1102,11 +1101,7 @@ class LifImageABC(ABC):
             *(
                 f'{name}: {getattr(self, name)!r}'[:160]
                 for name in dir(self)
-                if not (
-                    name.startswith('_')
-                    or name == 'xml_element_smd'
-                    or callable(getattr(self, name))
-                )
+                if not (name.startswith('_') or callable(getattr(self, name)))
             ),
         )
 
@@ -1118,19 +1113,6 @@ class LifImage(LifImageABC):
     Defined by XML Element with Data/Image child.
 
     """
-
-    @property
-    def xml_element_smd(self) -> ElementTree.Element | None:
-        # for backward compatibility with PhasorPy 0.4
-        warnings.warn(
-            'LifImage.xml_element_smd is deprecated.',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        uuid = self.uuid
-        return self.parent.xml_element.find(
-            f'.//Element[@UniqueID="{uuid}"]../../Data/SingleMoleculeDetection'
-        )
 
     @cached_property
     def _dimensions(self) -> tuple[LifDimension, ...]:
@@ -1312,7 +1294,12 @@ class LifImage(LifImageABC):
         path = self.path
         if self.parent.type == LifFileType.LIF:
             path = self.parent.name + '/' + path
-        attrs = {'path': path, 'UniqueID': self.uuid}
+        attrs = {
+            'filepath': self.parent.filepath,
+            'name': self.name,
+            'path': path,
+            'UniqueID': self.uuid,
+        }
         attrs.update(
             (attach.attrib['Name'], xml2dict(attach)['Attachment'])
             for attach in self.xml_element.findall('./Data/Image/Attachment')
@@ -1410,16 +1397,6 @@ class LifFlimImage(LifImageABC):
 
     """
 
-    @property
-    def xml_element_smd(self) -> ElementTree.Element | None:
-        # for backward compatibility with PhasorPy 0.4
-        warnings.warn(
-            'LifImage.xml_element_smd is deprecated.',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.xml_element
-
     @cached_property
     def dtype(self) -> numpy.dtype[Any]:
         return numpy.dtype(numpy.uint16)
@@ -1437,6 +1414,7 @@ class LifFlimImage(LifImageABC):
         for dimid, size in zip(
             dims.findall('Dimension/DimensionIdentifier'),
             dims.findall('Dimension/Size'),
+            strict=True,
         ):
             if dimid.text is None or size.text is None or int(size.text) <= 1:
                 continue
@@ -1476,6 +1454,8 @@ class LifFlimImage(LifImageABC):
             raise ValueError('RawData element not found in XML')
         attrs = xml2dict(rawdata, exclude={'Dimensions', 'Channels'})
         return {
+            'filepath': self.parent.filepath,
+            'name': self.name,
             'path': self.parent.name + '/' + self.path,
             'UniqueID': self.uuid,
             'RawData': attrs['RawData'],
@@ -1495,9 +1475,9 @@ class LifFlimImage(LifImageABC):
     def number_bins_in_period(self) -> int:
         """Delay time in one period."""
         attrs = self.attrs['RawData']
-        frequency = attrs['LaserPulseFrequency']
-        clock_period = attrs['ClockPeriod']
-        return max(1, int(math.floor(1.0 / frequency / clock_period)))
+        frequency = float(attrs['LaserPulseFrequency'])
+        clock_period = float(attrs['ClockPeriod'])
+        return max(1, math.floor(1.0 / frequency / clock_period))
 
     @property
     def pixel_time(self) -> float:
@@ -1561,8 +1541,8 @@ class LifFlimImage(LifImageABC):
                 Image data as numpy array.
 
         """
-        format = self.attrs['RawData']['Format']
-        raise NotImplementedError(f'{format=!r} is patent-pending')
+        fmt = self.attrs['RawData']['Format']
+        raise NotImplementedError(f'format={fmt!r} is patent-pending')
 
 
 @final
@@ -1582,13 +1562,12 @@ class LifImageSeries(Sequence[LifImageABC]):
         if parent.type not in {LifFileType.XLEF, LifFileType.XLCF}:
             keepbase = parent.type == LifFileType.LIFEXT
             for path, element in self._image_iter(parent.xml_element):
-                if not keepbase:
-                    path = path.split('/', 1)[-1]
+                path_ = path if keepbase else path.split('/', 1)[-1]
                 if element.find('./Data/SingleMoleculeDetection') is None:
-                    image = LifImage(parent, element, path)
+                    image = LifImage(parent, element, path_)
                 else:
-                    image = LifFlimImage(parent, element, path)
-                self._images[path] = image
+                    image = LifFlimImage(parent, element, path_)
+                self._images[path_] = image
 
         for child in parent.children:
             for image in child.images:
@@ -1597,7 +1576,6 @@ class LifImageSeries(Sequence[LifImageABC]):
                     path = f'{parent.name}/{path}'
                 self._images[path] = image
                 image.path = path
-        return
 
     @staticmethod
     def _image_iter(
@@ -1618,10 +1596,7 @@ class LifImageSeries(Sequence[LifImageABC]):
 
         for element in elements:
             name = element.attrib['Name']
-            if base_path == '':
-                path = name
-            else:
-                path = f'{base_path}/{name}'
+            path = name if base_path == '' else f'{base_path}/{name}'
             image = element.find('./Data/Image')
             if image is not None:
                 yield path, element
@@ -1707,8 +1682,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         if isinstance(key, int):
             try:
                 key = tuple(self._images.keys())[key]
-            except IndexError:
-                raise IndexError(f'image index={key} out of range')
+            except IndexError as exc:
+                raise IndexError(f'image index={key} out of range') from exc
             return self._images[key]
         if key in self._images:
             return self._images[key]
@@ -1847,8 +1822,8 @@ class LifMemoryBlock:
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
             with LifFile(path) as lof:
-                data = lof.images[0].memory_block.read()
-            return data
+                return lof.images[0].memory_block.read()
+
         if len(self.frames) > 0:
             dirname = self.parent.dirname
             buffer = bytearray(self.size)
@@ -1956,9 +1931,8 @@ class LifMemoryBlock:
 
         self.readinto(data)
 
-        if out is not None:
-            if hasattr(out, 'flush'):
-                out.flush()
+        if out is not None and hasattr(out, 'flush'):
+            out.flush()
 
         return data
 
@@ -2172,6 +2146,7 @@ else:
     def imread_fail(  # type: ignore[unreachable]
         filename: str, /, **kwargs: Any
     ) -> NDArray[Any]:
+        del kwargs
         raise ImportError(
             f'reading {os.path.splitext(filename)!r} '
             "files requires the 'imagecodecs' package"
@@ -2329,7 +2304,7 @@ def xml2dict(
     """Return XML as dictionary.
 
     Parameters:
-        xml_element: XML data to convert.
+        xml_element: XML element to convert.
         sanitize: Remove prefix from etree Element.
         prefix: Prefixes for dictionary keys.
         exclude: Ignore element tags.
@@ -2433,7 +2408,11 @@ def indent(*args: Any) -> str:
 
 
 def product(iterable: Iterable[int], /) -> int:
-    """Return product of integers."""
+    """Return product of integers.
+
+    Like math.prod, but does not overflow with numpy arrays.
+
+    """
     prod = 1
     for i in iterable:
         prod *= int(i)
@@ -2482,7 +2461,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv
 
-    filter = False
+    fltr = False
     if len(argv) == 1:
         path = askopenfilename(
             title='Select a Leica image file',
@@ -2496,15 +2475,12 @@ def main(argv: list[str] | None = None) -> int:
         files = glob(argv[1])
     elif os.path.isdir(argv[1]):
         files = glob(f'{argv[1]}/*.*l?f')
-        filter = True
+        fltr = True
     else:
         files = argv[1:]
 
     for fname in files:
-        if (
-            filter
-            and os.path.splitext(fname)[-1].lower() not in FILE_EXTENSIONS
-        ):
+        if fltr and os.path.splitext(fname)[-1].lower() not in FILE_EXTENSIONS:
             continue
         try:
             with LifFile(fname) as lif:
