@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.11.8
+:Version: 2025.12.12
 
 """
 
@@ -54,7 +54,7 @@ from xarray import DataArray
 try:
     import fsspec
 except ImportError:
-    fsspec = None  # type: ignore[assignment]
+    fsspec = None
 
 import liffile
 from liffile import (
@@ -875,6 +875,7 @@ class TestBinaryFile:
         filename: str | None = None,
         dirname: str | None = None,
         name: str | None = None,
+        *,
         closed: bool = True,
     ) -> None:
         """Assert BinaryFile attributes."""
@@ -886,6 +887,10 @@ class TestBinaryFile:
             dirname = os.path.dirname(self.fname)
         if name is None:
             name = fh.filename
+
+        attrs = fh.attrs
+        assert attrs['name'] == name
+        assert attrs['filepath'] == filepath
 
         assert fh.filepath == filepath
         assert fh.filename == filename
@@ -913,9 +918,8 @@ class TestBinaryFile:
 
     def test_open_file(self):
         """Test BinaryFile with open binary file."""
-        with open(self.fname, 'rb') as fh:
-            with BinaryFile(fh) as bf:
-                self.validate(bf, closed=False)
+        with open(self.fname, 'rb') as fh, BinaryFile(fh) as bf:
+            self.validate(bf, closed=False)
 
     def test_bytesio(self):
         """Test BinaryFile with BytesIO."""
@@ -946,8 +950,8 @@ class TestBinaryFile:
 
     def test_text_file_fails(self):
         """Test BinaryFile with open text file fails."""
-        with open(self.fname) as fh:
-            with pytest.raises(ValueError):
+        with open(self.fname) as fh:  # noqa: SIM117
+            with pytest.raises(TypeError):
                 BinaryFile(fh)
 
     def test_file_extension_fails(self):
@@ -978,6 +982,7 @@ class TestBinaryFile:
             # mock fsspec OpenFile without seek/tell methods
             @staticmethod
             def open(*args, **kwargs):
+                del args, kwargs
                 return File()
 
         with pytest.raises(ValueError):
@@ -1043,9 +1048,8 @@ class TestLifFile:
 
     def test_open_file(self):
         """Test LifFile with open binary file."""
-        with open(self.fname, 'rb') as fh:
-            with LifFile(fh) as lif:
-                self.validate(lif)
+        with open(self.fname, 'rb') as fh, LifFile(fh) as lif:
+            self.validate(lif)
 
     def test_bytesio(self):
         """Test LifFile with BytesIO."""
@@ -1099,7 +1103,9 @@ def test_imread(asxarray):
 def test_lif(filetype):
     """Test LIF file."""
     filename = DATA / 'ScanModesExamples.lif'
-    file = filename if filetype is str else open(filename, 'rb')
+    file = (
+        filename if filetype is str else open(filename, 'rb')  # noqa: SIM115
+    )
 
     with LifFile(file, mode='r+b', squeeze=True) as lif:
         str(lif)
@@ -1174,6 +1180,10 @@ def test_lif(filetype):
         assert im.nbytes == 1146880
         assert im.ndim == 5
         assert isinstance(im.xml_element, ElementTree.Element)
+
+        attrs = im.attrs
+        assert attrs['filepath'] == im.parent.filepath
+        assert attrs['name'] == im.name
 
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS-AF [ BETA ] 3.3.0.10067'
@@ -1673,7 +1683,6 @@ def test_flim(name):
         assert len(flim.child_images) == 9
         assert lif.uuid == 'd9f87ad9-b958-11ed-bb27-00506220277a'
         assert flim.is_flim
-        # assert flim.xml_element_smd == flim.xml_element
         assert flim.dtype == numpy.uint16
         assert flim.sizes == {'Y': 1024, 'X': 1024, 'H': 528}
         assert pytest.approx(flim.coords['X'][-1]) == 0.0005563808000453999
@@ -1691,7 +1700,7 @@ def test_flim(name):
         assert len(flim.timestamps) == 0
         if name == 'XLEF_TIF/FLIM_testdata.xlef':
             # TIFF file is actually a LOF file
-            with pytest.raises(Exception):
+            with pytest.raises(RuntimeError):
                 flim.memory_block.read()
         else:
             assert len(flim.memory_block.read()) == 15502568
@@ -1701,9 +1710,7 @@ def test_flim(name):
         intensity = lif.images['/Intensity']
         assert intensity in flim.child_images
         assert intensity.parent_image is flim
-        if 'FLIM_testdata.lif' in name:
-            with pytest.warns(DeprecationWarning):
-                assert intensity.xml_element_smd is not None
+
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float32
@@ -1712,9 +1719,7 @@ def test_flim(name):
         mean = lif.images['Phasor Intensity$']
         assert mean in flim.child_images
         assert mean.parent_image is flim
-        if 'FLIM_testdata.lif' in name:
-            with pytest.warns(DeprecationWarning):
-                assert mean.xml_element_smd is not None
+
         data = mean.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
@@ -1723,9 +1728,7 @@ def test_flim(name):
         real = lif.images['Phasor Real']
         assert real in flim.child_images
         assert real.parent_image is flim
-        if 'FLIM_testdata.lif' in name:
-            with pytest.warns(DeprecationWarning):
-                assert real.xml_element_smd is not None
+
         data = real.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
@@ -1734,9 +1737,7 @@ def test_flim(name):
         lifetime = lif.images['Fast Flim']
         assert lifetime in flim.child_images
         assert lifetime.parent_image is flim
-        if 'FLIM_testdata.lif' in name:
-            with pytest.warns(DeprecationWarning):
-                assert lifetime.xml_element_smd is not None
+
         data = lifetime.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.float16
@@ -1745,9 +1746,7 @@ def test_flim(name):
         mask = lif.images['Phasor Mask']
         assert mask in flim.child_images
         assert mask.parent_image is flim
-        if 'FLIM_testdata.lif' in name:
-            with pytest.warns(DeprecationWarning):
-                assert mask.xml_element_smd is not None
+
         data = mask.asxarray()
         assert data.shape == (1024, 1024)
         assert data.dtype == numpy.uint32
@@ -1781,7 +1780,6 @@ def test_flim_nd(name):
         assert len(flim.child_images) == 10
         assert lif.uuid == '4441a913-c99c-11ee-b559-98597a5338f0'
         assert flim.is_flim
-        # assert flim.xml_element_smd == flim.xml_element
         assert flim.dtype == numpy.uint16
         assert flim.sizes == {
             'T': 10,
@@ -1842,8 +1840,6 @@ def test_flim_lof():
         assert isinstance(flim, LifFlimImage)
         assert flim.uuid == '4a942888-fa9c-11eb-913c-a4bb6dd5b508'
         assert flim.is_flim
-        with pytest.warns(DeprecationWarning):
-            assert flim.xml_element_smd == flim.xml_element
         assert flim.dtype == numpy.uint16
         assert flim.sizes == {'C': 2, 'Y': 512, 'X': 512, 'H': 132}
         assert pytest.approx(flim.coords['X'][-1]) == 0.0011624999998359998
@@ -1914,8 +1910,8 @@ def test_rgb_pad():
         assert data.shape == (531, 531, 3)
         assert data.sum(dtype=numpy.uint64) == 676414
 
+        out = numpy.zeros((531, 531, 3), numpy.uint8)
         with pytest.raises(ValueError):
-            out = numpy.zeros((531, 531, 3), numpy.uint8)
             lif.images[1].asarray(out=out)
 
 
@@ -1928,7 +1924,7 @@ def test_output(output, asxarray):
     if output == 'ndarray':
         out = numpy.zeros((86, 2, 500, 616), numpy.uint16)
     elif output == 'fname':
-        out = tempfile.TemporaryFile()
+        out = tempfile.TemporaryFile()  # noqa: SIM115
     elif output == 'memmap:.':
         out = output
     else:
@@ -1998,7 +1994,7 @@ def test_phasor_from_lif():
     assert 'harmonic' not in attrs
 
     # select series
-    mean1, real1, imag1, attrs = phasor_from_lif(
+    mean1, _real1, _imag1, attrs = phasor_from_lif(
         filename, image='FLIM Compressed'
     )
     assert_array_equal(mean1, mean)
@@ -2100,7 +2096,7 @@ def test_gil_enabled():
     'fname',
     itertools.chain.from_iterable(
         glob.glob(f'**/*{ext}', root_dir=DATA, recursive=True)
-        for ext in FILE_EXTENSIONS.keys()
+        for ext in FILE_EXTENSIONS
     ),
 )
 def test_glob(fname):
@@ -2125,9 +2121,7 @@ def test_glob(fname):
                     image.asxarray()
             else:
                 image.asxarray()
-            image.timestamps
-            with pytest.warns(DeprecationWarning):
-                image.xml_element_smd
+            _ = image.timestamps
 
 
 if __name__ == '__main__':
