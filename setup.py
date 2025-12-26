@@ -32,7 +32,8 @@ def search(pattern: str, string: str, flags: int = 0) -> str:
     """Return first match of pattern in string."""
     match = re.search(pattern, string, flags)
     if match is None:
-        raise ValueError(f'{pattern!r} not found')
+        msg = f'{pattern=!r} not found'
+        raise ValueError(msg)
     return match.groups()[0]
 
 
@@ -72,7 +73,7 @@ readme = '\n'.join(
 )
 
 if 'sdist' in sys.argv:
-    # update README and LICENSE files
+    # update README, LICENSE, and CHANGES files
 
     with open('README.rst', 'w', encoding='utf-8') as fh:
         fh.write(fix_docstring_examples(readme))
@@ -146,7 +147,7 @@ setup(
     zip_safe=False,
     platforms=['any'],
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
