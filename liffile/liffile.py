@@ -1,6 +1,6 @@
 # liffile.py
 
-# Copyright (c) 2023-2025, Christoph Gohlke
+# Copyright (c) 2023-2026, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2025.12.12
+:Version: 2026.1.14
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -62,15 +62,19 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.3.5
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.11.11
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.11.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.7 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2025.12.12 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2025.12.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
 
 Revisions
 ---------
+
+2026.1.14
+
+- Improve code quality.
 
 2025.12.12
 
@@ -215,7 +219,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2025.12.12'
+__version__ = '2026.1.14'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -232,6 +236,7 @@ __all__ = [
     'xml2dict',
 ]
 
+import contextlib
 import enum
 import io
 import logging
@@ -413,16 +418,16 @@ class BinaryFile:
         if isinstance(file, (str, os.PathLike)):
             ext = os.path.splitext(file)[-1].lower()
             if self._ext and ext not in self._ext:
-                raise ValueError(
-                    f'invalid file extension: {ext!r} not in {self._ext!r}'
-                )
+                msg = f'invalid file extension: {ext!r} not in {self._ext!r}'
+                raise ValueError(msg)
             if mode is None:
                 mode = 'r'
             else:
                 if mode[-1:] == 'b':
                     mode = mode[:-1]  # type: ignore[assignment]
                 if mode not in {'r', 'r+'}:
-                    raise ValueError(f'invalid {mode=!r}')
+                    msg = f'invalid {mode=!r}'
+                    raise ValueError(msg)
             self._path = os.path.abspath(file)
             self._close = True
             self._fh = open(self._path, mode + 'b')  # noqa: SIM115
@@ -430,13 +435,15 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                raise TypeError(f'{file!r} is not open in binary mode')
+                msg = f'{file!r} is not open in binary mode'
+                raise TypeError(msg)
 
             self._fh = file
             try:
                 self._fh.tell()
             except Exception as exc:
-                raise ValueError(f'{file!r} is not seekable') from exc
+                msg = f'{file!r} is not seekable'
+                raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
             elif hasattr(file, 'name'):
@@ -449,16 +456,16 @@ class BinaryFile:
             try:
                 self._fh.tell()
             except Exception as exc:
-                try:
+                with contextlib.suppress(Exception):
                     self._fh.close()
-                except Exception:  # noqa: S110
-                    pass
-                raise ValueError(f'{file!r} is not seekable') from exc
+                msg = f'{file!r} is not seekable'
+                raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
 
         else:
-            raise ValueError(f'cannot handle {type(file)=}')
+            msg = f'cannot handle {type(file)=}'
+            raise ValueError(msg)
 
         if hasattr(file, 'name') and file.name:
             self._name = os.path.basename(file.name)
@@ -609,10 +616,8 @@ class LifFile(BinaryFile):
             LifFileType.XLEF,
             LifFileType.XLCF,
         }:
-            try:
+            with contextlib.suppress(Exception):
                 self._fh.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _init(self) -> None:
         """Initialize from open file."""
@@ -621,7 +626,8 @@ class LifFile(BinaryFile):
         try:
             id0, size, id1, strlen = struct.unpack('<IIBI', fh.read(13))
         except Exception as exc:
-            raise LifFileError('not a Leica image file') from exc
+            msg = 'not a Leica image file'
+            raise LifFileError(msg) from exc
 
         if id0 in XML_CODEC:
             # XML: XLEF, XLCF, or XLIF
@@ -636,10 +642,11 @@ class LifFile(BinaryFile):
             xml_header = fh.read(strlen * 2).decode('utf-16-le')
 
         else:
-            raise LifFileError(
+            msg = (
                 'not a Leica image file '
                 f'({id0=:02X} != 0x70 or {id1=:02X} != 0x2A)'
             )
+            raise LifFileError(msg)
 
         if xml_header == 'LMS_Object_File':
             self.type = LifFileType.LOF
@@ -647,25 +654,29 @@ class LifFile(BinaryFile):
             try:
                 id0, _ver0, id1, _ver1 = struct.unpack('<BIBI', fh.read(10))
             except Exception as exc:
-                raise LifFileError('corrupted Leica object file') from exc
+                msg = 'corrupted Leica object file'
+                raise LifFileError(msg) from exc
             if id0 != 0x2A or id1 != 0x2A:
-                raise LifFileError(
+                msg = (
                     'corrupted Leica object file '
                     f'({id0=:02X} != 0x2A or {id1=:02X} != 0x2A)'
                 )
+                raise LifFileError(msg)
             memblock = LifMemoryBlock(self)
 
             # read XML header
             try:
                 id0, size, id1, xmlsize = struct.unpack('<IIBI', fh.read(13))
             except Exception as exc:
-                raise LifFileError('corrupted Leica object file') from exc
+                msg = 'corrupted Leica object file'
+                raise LifFileError(msg) from exc
             if id0 != 0x70 or id1 != 0x2A or size != 2 * xmlsize + 5:
-                raise LifFileError(
+                msg = (
                     'corrupted Leica object file '
                     f'({id0=:02X} != 0x70, {id1=:02X} != 0x2A, or '
                     f'{size=} != {2 * xmlsize + 5})'
                 )
+                raise LifFileError(msg)
             self._xml_header = (fh.tell(), xmlsize * 2)
             xml_header = fh.read(xmlsize * 2).decode('utf-16-le')
 
@@ -704,8 +715,9 @@ class LifFile(BinaryFile):
         try:
             self.version = int(self.xml_element.attrib['Version'])
         except KeyError as exc:
-            if not self.type == LifFileType.LOF:
-                raise KeyError('Version attribute not found in XML') from exc
+            if self.type != LifFileType.LOF:
+                msg = 'Version attribute not found in XML'
+                raise KeyError(msg) from exc
 
         # add memory blocks
         if self.type == LifFileType.LOF:
@@ -748,7 +760,8 @@ class LifFile(BinaryFile):
             self.memory_blocks[memblock.id] = memblock
 
         else:
-            raise ValueError(f'unsupported file type={self.type!r}')
+            msg = f'unsupported file type={self.type!r}'
+            raise ValueError(msg)
 
     @property
     def datetime(self) -> datetime | None:
@@ -1010,10 +1023,12 @@ class LifImageABC(ABC):
             ]
         memory = self.xml_element.find('./Memory')
         if memory is None:
-            raise IndexError('Memory element not found in XML')
+            msg = 'Memory element not found in XML'
+            raise IndexError(msg)
         mbid = memory.get('MemoryBlockID')
         if mbid is None:
-            raise IndexError('MemoryBlockID attribute not found in XML')
+            msg = 'MemoryBlockID attribute not found in XML'
+            raise IndexError(msg)
         return self.parent.memory_blocks[mbid]
 
     @property
@@ -1161,12 +1176,14 @@ class LifImage(LifImageABC):
             elif data_type == 1:
                 dtype = 'f'
             else:
-                raise ValueError(f'invalid {data_type=}')
+                msg = f'invalid {data_type=}'
+                raise ValueError(msg)
 
             if 0 < resolution <= 8:
                 itemsize = 1
                 if dtype == 'f':
-                    raise ValueError(f'invalid dtype {dtype}{itemsize}')
+                    msg = f'invalid dtype {dtype}{itemsize}'
+                    raise ValueError(msg)
             elif resolution <= 16:
                 itemsize = 2
             elif resolution <= 32:
@@ -1174,7 +1191,8 @@ class LifImage(LifImageABC):
             elif resolution <= 64:
                 itemsize = 8
             else:
-                raise ValueError(f'invalid {resolution=}')
+                msg = f'invalid {resolution=}'
+                raise ValueError(msg)
 
             channels.append(
                 LifChannel(
@@ -1203,10 +1221,11 @@ class LifImage(LifImageABC):
         dtype = channels[0].dtype
 
         if len(channels) > 1 and any(dtype != c.dtype for c in channels):
-            raise ValueError(
+            msg = (
                 'heterogeneous channel data types not supported. '
                 'Please share the file at https://github.com/cgohlke/liffile'
             )
+            raise ValueError(msg)
 
         return dtype
 
@@ -1253,10 +1272,11 @@ class LifImage(LifImageABC):
                     sizes_stored['X'] = size
                     assert sizes_stored['X'] > sizes['X']
                 else:
-                    raise ValueError(
+                    msg = (
                         f'{stride=} % {dim.bytes_inc=} '
                         f'== {dim.bytes_inc % stride} != 0'
                     )
+                    raise ValueError(msg)
             sizes[dim.label] = dim.number_elements
             stride = dim.number_elements * dim.bytes_inc
         if nchannels > 1:
@@ -1409,7 +1429,8 @@ class LifFlimImage(LifImageABC):
             './Data/SingleMoleculeDetection/Dataset/RawData/Dimensions'
         )
         if dims is None:
-            raise ValueError('Dimensions element not found in XML')
+            msg = 'Dimensions element not found in XML'
+            raise ValueError(msg)
 
         for dimid, size in zip(
             dims.findall('Dimension/DimensionIdentifier'),
@@ -1451,7 +1472,8 @@ class LifFlimImage(LifImageABC):
             './Data/SingleMoleculeDetection/Dataset/RawData'
         )
         if rawdata is None:
-            raise ValueError('RawData element not found in XML')
+            msg = 'RawData element not found in XML'
+            raise ValueError(msg)
         attrs = xml2dict(rawdata, exclude={'Dimensions', 'Channels'})
         return {
             'filepath': self.parent.filepath,
@@ -1542,7 +1564,8 @@ class LifFlimImage(LifImageABC):
 
         """
         fmt = self.attrs['RawData']['Format']
-        raise NotImplementedError(f'format={fmt!r} is patent-pending')
+        msg = f'format={fmt!r} is patent-pending'
+        raise NotImplementedError(msg)
 
 
 @final
@@ -1683,7 +1706,8 @@ class LifImageSeries(Sequence[LifImageABC]):
             try:
                 key = tuple(self._images.keys())[key]
             except IndexError as exc:
-                raise IndexError(f'image index={key} out of range') from exc
+                msg = f'image index={key} out of range'
+                raise IndexError(msg) from exc
             return self._images[key]
         if key in self._images:
             return self._images[key]
@@ -1691,7 +1715,8 @@ class LifImageSeries(Sequence[LifImageABC]):
         for image in self._images.values():
             if pattern.search(image.path) is not None:
                 return image
-        raise KeyError(f'image {key!r} not found')
+        msg = f'image {key!r} not found'
+        raise KeyError(msg)
 
     def __len__(self) -> int:
         return len(self._images)
@@ -1751,7 +1776,8 @@ class LifMemoryBlock:
         if parent.type == LifFileType.XLIF:
             memory = parent.xml_element.find('./Element/Memory')
             if memory is None:
-                raise ValueError('Memory element not found in XML')
+                msg = 'Memory element not found in XML'
+                raise ValueError(msg)
             self.offset = -1
             self.size = int(memory.attrib['Size'])
             self.id = memory.get('MemoryBlockID', '')
@@ -1775,7 +1801,8 @@ class LifMemoryBlock:
         elif parent.version == 1:
             fmtstr = '<IIBIBI'
         else:
-            raise ValueError(f'invalid memory block {parent.version=}')
+            msg = f'invalid memory block {parent.version=}'
+            raise ValueError(msg)
 
         fh = parent.filehandle
         size = struct.calcsize(fmtstr)
@@ -1787,17 +1814,17 @@ class LifMemoryBlock:
             self.id = 'MemBlock_0'  # updated in LifFile._init
             id0, size = struct.unpack(fmtstr, buffer)
             if id0 != 0x2A:
-                raise LifFileError(
-                    f'corrupted LOF memory block ({id0=:02X} != 0x2A)'
-                )
+                msg = f'corrupted LOF memory block ({id0=:02X} != 0x2A)'
+                raise LifFileError(msg)
         else:
             # parent.type == LifFileType.LIF:
             id0, _, id1, size1, id2, strlen = struct.unpack(fmtstr, buffer)
             if id0 != 0x70 or id1 != 0x2A or id2 != 0x2A:
-                raise LifFileError(
+                msg = (
                     f'corrupted LIF memory block ({id0=:02X} != 0x70, '
                     f'{id1=:02X} != 0x2A, or {id2=:02X} != 0x2A)'
                 )
+                raise LifFileError(msg)
 
             buffer = fh.read(strlen * 2)
             if len(buffer) != strlen * 2:
@@ -1835,15 +1862,18 @@ class LifMemoryBlock:
         self.parent.filehandle.seek(self.offset)
         buffer = self.parent.filehandle.read(self.size)
         if len(buffer) != self.size:
-            raise OSError(f'read {len(buffer)} bytes, expected {self.size}')
+            msg = f'read {len(buffer)} bytes, expected {self.size}'
+            raise OSError(msg)
         return buffer
 
     def readinto(self, buffer: NDArray[Any], /) -> None:
         """Read memory block from file into contiguous ndarray."""
         if not buffer.flags.c_contiguous:
-            raise ValueError('buffer must be contiguous')
+            msg = 'buffer must be contiguous'
+            raise ValueError(msg)
         if buffer.nbytes != self.size:
-            raise ValueError(f'{buffer.nbytes} != {self.size=}')
+            msg = f'{buffer.nbytes} != {self.size=}'
+            raise ValueError(msg)
         buffer = buffer.reshape(-1).view(numpy.uint8)
 
         if self.parent.type == LifFileType.XLIF:
@@ -1863,7 +1893,8 @@ class LifMemoryBlock:
             buffer[:] = numpy.frombuffer(data, numpy.uint8)
 
         if nbytes != self.size:
-            raise OSError(f'read {nbytes} bytes, expected {self.size}')
+            msg = f'read {nbytes} bytes, expected {self.size}'
+            raise OSError(msg)
 
     def read_array(
         self,
@@ -1897,9 +1928,8 @@ class LifMemoryBlock:
         dtype = numpy.dtype(dtype)
         nbytes = product(shape) * dtype.itemsize
         if nbytes > self.size:
-            raise ValueError(
-                f'array size={nbytes} > memory block size={self.size}'
-            )
+            msg = f'array size={nbytes} > memory block size={self.size}'
+            raise ValueError(msg)
         if nbytes != self.size:
             logger().warning(f'{self!r} != array size={nbytes}')
 
@@ -1927,7 +1957,8 @@ class LifMemoryBlock:
 
         data = create_output(out, shape, dtype)
         if data.nbytes != nbytes:
-            raise ValueError('size mismatch')
+            msg = 'size mismatch'
+            raise ValueError(msg)
 
         self.readinto(data)
 
@@ -1990,7 +2021,8 @@ class LifMemoryFrame:
         """
         ext = os.path.splitext(self.file)[1].lower()
         if ext not in IMREAD:
-            raise ValueError(f'unsupported file extension {ext!r}')
+            msg = f'unsupported file extension {ext!r}'
+            raise ValueError(msg)
         path = os.path.join(dirname, self.file)
         if not os.path.exists(path):
             path = case_sensitive_path(path)
@@ -2004,7 +2036,8 @@ class LifMemoryFrame:
                 # RGB -> grayscale
                 im = im[:, :, 0]
             else:
-                raise ValueError(f'{self.size!r} != array size={im.nbytes}')
+                msg = f'{self.size!r} != array size={im.nbytes}'
+                raise ValueError(msg)
         return im
 
     def __repr__(self) -> str:
@@ -2147,10 +2180,11 @@ else:
         filename: str, /, **kwargs: Any
     ) -> NDArray[Any]:
         del kwargs
-        raise ImportError(
+        msg = (
             f'reading {os.path.splitext(filename)!r} '
             "files requires the 'imagecodecs' package"
         )
+        raise ImportError(msg)
 
     imread_tif = imread_jpg = imread_png = imread_bmp = imread_fail
 
@@ -2220,41 +2254,98 @@ FILE_EXTENSIONS = {
 def create_output(
     out: OutputType,
     /,
-    shape: tuple[int, ...],
-    dtype: DTypeLike,
+    shape: Sequence[int],
+    dtype: DTypeLike | None,
+    *,
+    mode: Literal['r+', 'w+', 'r', 'c'] = 'w+',
+    suffix: str | None = None,
+    fillvalue: float | None = None,
 ) -> NDArray[Any] | numpy.memmap[Any, Any]:
-    """Return NumPy array where images of shape and dtype can be copied.
+    """Return NumPy array where data of shape and dtype can be copied.
 
     Parameters:
-        out: Output specification.
+        out:
+            Specifies kind of array of `shape` and `dtype` to return:
 
-            - None: Create new array in memory
-            - numpy.ndarray: Existing array (will be reshaped)
-            - str starting with 'memmap': Create temporary memory-mapped file
-            - str (file path): Create memory-mapped file at specified path
-
-        shape: Shape of output array.
-        dtype: Data type of output array.
+                `None`:
+                    Return new array.
+                `numpy.ndarray`:
+                    Return view of existing array.
+                `'memmap'` or `'memmap:tempdir'`:
+                    Return memory-map to array stored in temporary binary file.
+                `str` or open file:
+                    Return memory-map to array stored in specified binary file.
+        shape:
+            Shape of array to return.
+        dtype:
+            Data type of array to return.
+            If `out` is an existing array, `dtype` must be castable to its
+            data type.
+        mode:
+            File mode to create memory-mapped array.
+            The default is 'w+' to create new, or overwrite existing file for
+            reading and writing.
+        suffix:
+            Suffix of `NamedTemporaryFile` if `out` is `'memmap'`.
+            The default is '.memmap'.
+        fillvalue:
+            Value to initialize output array.
+            By default, return uninitialized array.
 
     Returns:
-        Configured NumPy array or memory-mapped array.
+        NumPy array or memory-mapped array of `shape` and `dtype`.
 
     Raises:
-        ValueError: Existing array cannot be reshaped to required shape.
+        ValueError:
+            Existing array cannot be reshaped to `shape` or cast to `dtype`.
 
     """
+    shape = tuple(shape)
+    dtype = numpy.dtype(dtype)
     if out is None:
+        if fillvalue is None:
+            return numpy.empty(shape, dtype)
+        if fillvalue:
+            return numpy.full(shape, fillvalue, dtype)
         return numpy.zeros(shape, dtype)
     if isinstance(out, numpy.ndarray):
-        out.shape = shape
+        if product(shape) != product(out.shape):
+            msg = f'cannot reshape {shape} to {out.shape}'
+            raise ValueError(msg)
+        if not numpy.can_cast(dtype, out.dtype):
+            msg = f'cannot cast {dtype} to {out.dtype}'
+            raise ValueError(msg)
+        out = out.reshape(shape)
+        if fillvalue is not None:
+            out.fill(fillvalue)
         return out
     if isinstance(out, str) and out[:6] == 'memmap':
         import tempfile
 
         tempdir = out[7:] if len(out) > 7 else None
-        with tempfile.NamedTemporaryFile(dir=tempdir, suffix='.memmap') as fh:
-            return numpy.memmap(fh, shape=shape, dtype=dtype, mode='w+')
-    return numpy.memmap(out, shape=shape, dtype=dtype, mode='w+')
+        if suffix is None:
+            suffix = '.memmap'
+        with tempfile.NamedTemporaryFile(dir=tempdir, suffix=suffix) as fh:
+            out = numpy.memmap(fh, shape=shape, dtype=dtype, mode=mode)
+            if fillvalue is not None:
+                out.fill(fillvalue)
+            return out
+    out = numpy.memmap(out, shape=shape, dtype=dtype, mode=mode)
+    if fillvalue is not None:
+        out.fill(fillvalue)
+    return out
+
+
+def product(iterable: Iterable[int], /) -> int:
+    """Return product of integers.
+
+    Like math.prod, but does not overflow with numpy arrays.
+
+    """
+    prod = 1
+    for i in iterable:
+        prod *= int(i)
+    return prod
 
 
 @lru_cache(maxsize=128)
@@ -2287,9 +2378,11 @@ def case_sensitive_path(path: str, /) -> str:
             for entry in it:
                 if entry.name.lower() == basename:
                     return os.path.join(dirname, entry.name)
-        raise FileNotFoundError(f'{str(path)!r} not found')
+        msg = f'{str(path)!r} not found'
+        raise FileNotFoundError(msg)
     except (OSError, PermissionError) as exc:
-        raise FileNotFoundError(f'{str(path)!r} not accessible') from exc
+        msg = f'{str(path)!r} not accessible'
+        raise FileNotFoundError(msg) from exc
 
 
 def xml2dict(
@@ -2405,18 +2498,6 @@ def indent(*args: Any) -> str:
     return '\n'.join(
         ('  ' + line if line else line) for line in text.splitlines() if line
     )[2:]
-
-
-def product(iterable: Iterable[int], /) -> int:
-    """Return product of integers.
-
-    Like math.prod, but does not overflow with numpy arrays.
-
-    """
-    prod = 1
-    for i in iterable:
-        prod *= int(i)
-    return prod
 
 
 def logger() -> logging.Logger:
