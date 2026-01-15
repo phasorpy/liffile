@@ -1,6 +1,6 @@
 # test_liffile.py
 
-# Copyright (c) 2023-2025, Christoph Gohlke
+# Copyright (c) 2023-2026, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2025.12.12
+:Version: 2026.1.14
 
 """
 
@@ -86,7 +86,7 @@ SCANMODES = [
     ('XZYT', {'T': 7, 'Y': 5, 'C': 2, 'Z': 128, 'X': 128}, 'uint8'),
     ('XYLambda', {'λ': 9, 'Y': 128, 'X': 128}, 'uint8'),
     ('XZLambda', {'λ': 9, 'Z': 128, 'X': 128}, 'uint8'),
-    ('XYLamdaZ', {'Z': 5, 'λ': 9, 'Y': 128, 'X': 128}, 'uint8'),
+    ('XYLamdaZ', {'Z': 5, 'λ': 9, 'Y': 128, 'X': 128}, 'uint8'),  # typo
     ('XYLambdaT', {'T': 7, 'λ': 9, 'Y': 128, 'X': 128}, 'uint8'),
     ('XZLambdaT', {'T': 7, 'λ': 9, 'Z': 128, 'X': 128}, 'uint8'),
     ('XYZLambdaT', {'T': 7, 'λ': 9, 'Z': 5, 'Y': 128, 'X': 128}, 'uint8'),
@@ -2108,7 +2108,11 @@ def test_glob(fname):
         str(lif)
         if lif.type == LifFileType.LIFEXT:
             assert len(lif.images) > 0
-        elif lif.name in {'FrameProperties', 'IOManagerConfiguation', ''}:
+        elif lif.name in {
+            'FrameProperties',
+            'IOManagerConfiguation',  # typo
+            '',
+        }:
             assert len(lif.images) == 0
         elif lif.type == LifFileType.LOF:
             assert len(lif.images) == 1
