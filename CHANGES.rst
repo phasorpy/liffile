@@ -1,6 +1,11 @@
 Revisions
 ---------
 
+2026.1.22
+
+- Fix reading sequence of LifMemoryBlocks.
+- Change unknown axis code to '?'.
+
 2026.1.14
 
 - Improve code quality.
