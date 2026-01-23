@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.1.14
+:Version: 2026.1.22
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -71,6 +71,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.1.22
+
+- Fix reading sequence of LifMemoryBlocks.
+- Change unknown axis code to '?'.
 
 2026.1.14
 
@@ -191,7 +196,7 @@ Read a FLIM lifetime image and metadata from a LIF file:
 
 >>> with LifFile('tests/data/FLIM.lif') as lif:
 ...     for image in lif.images:
-...         name = image.name
+...         _ = image.name
 ...     image = lif.images['Fast Flim']
 ...     assert image.shape == (1024, 1024)
 ...     assert image.dims == ('Y', 'X')
@@ -219,7 +224,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.1.14'
+__version__ = '2026.1.22'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -742,7 +747,7 @@ class LifFile(BinaryFile):
             while True:
                 try:
                     memblock = LifMemoryBlock(self)
-                except OSError:
+                except (OSError, LifFileError):
                     break
                 self.memory_blocks[memblock.id] = memblock
 
@@ -1061,8 +1066,6 @@ class LifImageABC(ABC):
                 of :py:attr:`shape` and :py:attr:`dtype`.
                 If a ``file name`` or ``open file``, create a
                 memory-mapped array in the specified file.
-            **kwargs:
-                Optional arguments.
 
         Returns:
             :
@@ -1140,7 +1143,7 @@ class LifImage(LifImageABC):
             )
         ):
             dim_id = int(dim.attrib['DimID'])
-            label = DIMENSION_ID.get(dim_id, 'Q')
+            label = DIMENSION_ID.get(dim_id, '?')
             if label in labels:
                 logger().warning(f'duplicate dimension {label!r}')
                 label = f'{label}{i}'
@@ -2205,11 +2208,11 @@ DIMENSION_ID = {
     3: 'Z',
     4: 'T',
     5: 'λ',  # emission wavelength
-    6: 'A',  # rotation ?
+    6: 'A',  # rotation
     7: 'N',  # XT slices
-    8: 'Q',  # T slices ?
+    8: 'Q',  # T slices. TODO: what does LASX use?
     9: 'Λ',  # excitation wavelength
-    10: 'M',  # mosaic position. 'S' in LAS X
+    10: 'M',  # mosaic position. 'S' in LAS X (StagePos)
     11: 'L',  # loop
 }
 """Map dimension id to character code."""
