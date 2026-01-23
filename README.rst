@@ -12,7 +12,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.1.14
+:Version: 2026.1.22
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -44,6 +44,11 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.1.22
+
+- Fix reading sequence of LifMemoryBlocks.
+- Change unknown axis code to '?'.
 
 2026.1.14
 
@@ -166,7 +171,7 @@ Read a FLIM lifetime image and metadata from a LIF file:
 
     >>> with LifFile('tests/data/FLIM.lif') as lif:
     ...     for image in lif.images:
-    ...         name = image.name
+    ...         _ = image.name
     ...     image = lif.images['Fast Flim']
     ...     assert image.shape == (1024, 1024)
     ...     assert image.dims == ('Y', 'X')
