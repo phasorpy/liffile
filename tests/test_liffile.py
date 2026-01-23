@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.1.14
+:Version: 2026.1.22
 
 """
 
@@ -1915,6 +1915,30 @@ def test_rgb_pad():
             lif.images[1].asarray(out=out)
 
 
+def test_issue_memoryblocks():
+    """Test reading sequence of LifMemoryBlocks."""
+    # this file failed with Liffile < 2026.1.22
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        assert len(lif.images) == 1
+        assert len(lif.memory_blocks) == 2
+        assert len(lif.children) == 0
+
+        image = lif.images[0]
+        assert image.dtype == numpy.uint8
+        assert image.sizes == {'C': 4, 'Z': 10, 'Y': 1024, 'X': 1024}
+        data = image.asxarray()
+        assert data.shape == (4, 10, 1024, 1024)
+
+        memblock = lif.memory_blocks['MemBlock_102']
+        assert memblock.offset == 195097
+        assert memblock.size == 41943040
+
+        memblock = lif.memory_blocks['MemBlock_95']
+        assert memblock.offset == 195051
+        assert memblock.size == 0
+
+
 @pytest.mark.parametrize('asxarray', [False, True])
 @pytest.mark.parametrize('output', ['ndarray', 'memmap', 'memmap:.', 'fname'])
 def test_output(output, asxarray):
@@ -2058,8 +2082,7 @@ def test_case_sensitive_path(path, name):
 
 def test_xml2dict():
     """Test xml2dict function."""
-    xml = ElementTree.fromstring(
-        """<?xml version="1.0" ?>
+    xml = ElementTree.fromstring("""<?xml version="1.0" ?>
     <root attr="attribute">
         <int>-1</int>
         <ints>-1,2</ints>
@@ -2068,8 +2091,7 @@ def test_xml2dict():
         <bool>True</bool>
         <string>Lorem, Ipsum</string>
     </root>
-    """
-    )
+    """)
     d = xml2dict(xml)['root']
     assert d['attr'] == 'attribute'
     assert d['int'] == -1
@@ -2126,6 +2148,10 @@ def test_glob(fname):
             else:
                 image.asxarray()
             _ = image.timestamps
+            for ax in 'QA?':
+                if ax in image.dims:
+                    msg = f'unexpected dimension {ax} in file {fname}'
+                    raise ValueError(msg)
 
 
 if __name__ == '__main__':
