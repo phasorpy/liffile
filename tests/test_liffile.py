@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.1.22
+:Version: 2026.2.15
 
 """
 
@@ -65,8 +65,10 @@ from liffile import (
     LifFlimImage,
     LifImage,
     LifImageABC,
+    LifImageFrames,
     LifImageSeries,
     LifMemoryBlock,
+    LifMemoryBlockType,
     __version__,
     imread,
     xml2dict,
@@ -75,6 +77,16 @@ from liffile.liffile import BinaryFile, case_sensitive_path
 
 HERE = pathlib.Path(os.path.dirname(__file__))
 DATA = HERE / 'data'
+
+
+@pytest.fixture
+def scanmodes_file():
+    """Fixture providing path to ScanModesExamples.lif file."""
+    filename = DATA / 'ScanModesExamples.lif'
+    if not os.path.exists(filename):
+        pytest.skip(f'{filename!r} not found')
+    return filename
+
 
 SCANMODES = [
     ('XT-Slices', {'N': 5, 'C': 2, 'T': 10, 'X': 128}, 'uint8'),
@@ -491,7 +503,7 @@ SCANMODES = [
         {'L': 3, 'λ': 9, 'Z': 128, 'X': 128},
         'uint8',
     ),
-    (
+    (  # T and L have same bytes_inc but T is before L in XML
         'SequenceLambda/Job_XYZL097',
         {'T': 1, 'L': 3, 'λ': 9, 'Z': 5, 'Y': 128, 'X': 128},
         'uint8',
@@ -852,6 +864,77 @@ SCANMODES = [
 ]
 
 
+def _assert_frames(image: LifImage, expected: numpy.ndarray) -> None:
+    """Assert frame access methods are consistent with asarray data."""
+    frames = image.frames
+    assert isinstance(frames, LifImageFrames)
+    repr(frames)
+    str(frames)
+
+    # assert frame_sizes are consistent
+    frame_sizes = frames.frame_sizes
+    assert isinstance(frame_sizes, dict)
+    assert tuple(frame_sizes.keys()) == frames.frame_dims
+    assert tuple(frame_sizes.values()) == frames.frame_shape
+
+    # frame dimensions must be suffix of image dimensions
+    if frame_sizes:
+        frame_dims = tuple(frame_sizes.keys())
+        frame_shape = tuple(frame_sizes.values())
+        assert image.dims[-len(frame_sizes) :] == frame_dims
+        assert image.shape[-len(frame_sizes) :] == frame_shape
+    else:
+        # no contiguous frame dimensions identified, cannot iterate frames
+        return
+
+    # assert iteration dimensions
+    non_frame_dims = [d for d in image.dims if d not in frame_sizes]
+    if not non_frame_dims:
+        # single frame image should yield one empty tuple
+        assert list(frames.keys()) == [()]
+        return
+
+    # count total frames
+    expected_count = 1
+    for dim in non_frame_dims:
+        expected_count *= image.sizes[dim]
+    assert len(frames) == expected_count
+    assert len(tuple(frames.keys())) == expected_count
+
+    # test selection with int (fixed index)
+    first_dim = non_frame_dims[0]
+    fixed_frames = frames(**{first_dim: 0})
+    expected_fixed = expected_count // image.sizes[first_dim]
+    assert len(fixed_frames) == expected_fixed
+
+    # test selection with slice
+    if image.sizes[non_frame_dims[0]] > 2:
+        dim = non_frame_dims[0]
+        sliced_frames = frames(**{dim: slice(0, 2)})
+        expected_sliced = expected_count // image.sizes[dim] * 2
+        assert len(sliced_frames) == expected_sliced
+
+    # test selection with sequence
+    if image.sizes[non_frame_dims[0]] > 1:
+        dim = non_frame_dims[0]
+        seq_frames = frames(**{dim: [0]})
+        expected_seq = expected_count // image.sizes[dim]
+        assert len(seq_frames) == expected_seq
+
+    # first frame should match
+    assert_array_equal(image.frame(), frames[0])
+
+    for frame in frames.values():
+        assert_array_equal(frame, frames[0])
+        break
+
+    # frames.asarray should match image.asarray()
+    out = numpy.empty(frames.shape, frames.dtype)
+    xout = frames.asxarray(out=out)
+    assert_array_equal(out, expected)
+    assert isinstance(xout, xarray.DataArray)
+
+
 @pytest.mark.skipif(__doc__ is None, reason='__doc__ is None')
 def test_version():
     """Assert liffile versions match docstrings."""
@@ -864,9 +947,9 @@ class TestBinaryFile:
     """Test BinaryFile with different file-like inputs."""
 
     def setup_method(self):
-        self.fname = os.path.normpath(DATA / 'binary.bin')
-        if not os.path.exists(self.fname):
-            pytest.skip(f'{self.fname!r} not found')
+        self.filename = os.path.normpath(DATA / 'binary.bin')
+        if not os.path.exists(self.filename):
+            pytest.skip(f'{self.filename!r} not found')
 
     def validate(
         self,
@@ -880,11 +963,11 @@ class TestBinaryFile:
     ) -> None:
         """Assert BinaryFile attributes."""
         if filepath is None:
-            filepath = self.fname
+            filepath = self.filename
         if filename is None:
-            filename = os.path.basename(self.fname)
+            filename = os.path.basename(self.filename)
         if dirname is None:
-            dirname = os.path.dirname(self.fname)
+            dirname = os.path.dirname(self.filename)
         if name is None:
             name = fh.filename
 
@@ -906,24 +989,24 @@ class TestBinaryFile:
 
     def test_str(self):
         """Test BinaryFile with str path."""
-        file = self.fname
+        file = self.filename
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     def test_pathlib(self):
         """Test BinaryFile with pathlib.Path."""
-        file = pathlib.Path(self.fname)
+        file = pathlib.Path(self.filename)
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     def test_open_file(self):
         """Test BinaryFile with open binary file."""
-        with open(self.fname, 'rb') as fh, BinaryFile(fh) as bf:
+        with open(self.filename, 'rb') as fh, BinaryFile(fh) as bf:
             self.validate(bf, closed=False)
 
     def test_bytesio(self):
         """Test BinaryFile with BytesIO."""
-        with open(self.fname, 'rb') as fh:
+        with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
         with BinaryFile(file) as fh:
             self.validate(
@@ -938,19 +1021,19 @@ class TestBinaryFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_openfile(self):
         """Test BinaryFile with fsspec OpenFile."""
-        file = fsspec.open(self.fname)
+        file = fsspec.open(self.filename)
         with BinaryFile(file) as fh:
             self.validate(fh, closed=True)
 
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_localfileopener(self):
         """Test BinaryFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.fname) as file, BinaryFile(file) as fh:
+        with fsspec.open(self.filename) as file, BinaryFile(file) as fh:
             self.validate(fh, closed=False)
 
     def test_text_file_fails(self):
         """Test BinaryFile with open text file fails."""
-        with open(self.fname) as fh:  # noqa: SIM117
+        with open(self.filename) as fh:  # noqa: SIM117
             with pytest.raises(TypeError):
                 BinaryFile(fh)
 
@@ -960,7 +1043,7 @@ class TestBinaryFile:
         BinaryFile._ext = {'.lif'}
         try:
             with pytest.raises(ValueError):
-                BinaryFile(self.fname)
+                BinaryFile(self.filename)
         finally:
             BinaryFile._ext = ext
 
@@ -1001,16 +1084,16 @@ class TestBinaryFile:
     def test_invalid_mode(self):
         """Test BinaryFile with invalid mode fails."""
         with pytest.raises(ValueError):
-            BinaryFile(self.fname, mode='ab')
+            BinaryFile(self.filename, mode='ab')
 
 
 class TestLifFile:
     """Test LifFile with different file-like inputs."""
 
-    def setup_method(self):
-        self.fname = os.path.normpath(DATA / 'ScanModesExamples.lif')
-        if not os.path.exists(self.fname):
-            pytest.skip(f'{self.fname!r} not found')
+    @pytest.fixture(autouse=True)
+    def setup(self, scanmodes_file):
+        """Set up test with scanmodes file."""
+        self.filename = os.path.normpath(scanmodes_file)
 
     def validate(self, lif: LifFile) -> None:
         # assert LifFile attributes
@@ -1036,24 +1119,24 @@ class TestLifFile:
 
     def test_str(self):
         """Test LifFile with str path."""
-        file = self.fname
+        file = self.filename
         with LifFile(file) as lif:
             self.validate(lif)
 
     def test_pathlib(self):
         """Test LifFile with pathlib.Path."""
-        file = pathlib.Path(self.fname)
+        file = pathlib.Path(self.filename)
         with LifFile(file) as lif:
             self.validate(lif)
 
     def test_open_file(self):
         """Test LifFile with open binary file."""
-        with open(self.fname, 'rb') as fh, LifFile(fh) as lif:
+        with open(self.filename, 'rb') as fh, LifFile(fh) as lif:
             self.validate(lif)
 
     def test_bytesio(self):
         """Test LifFile with BytesIO."""
-        with open(self.fname, 'rb') as fh:
+        with open(self.filename, 'rb') as fh:
             file = io.BytesIO(fh.read())
         with LifFile(file) as lif:
             self.validate(lif)
@@ -1061,7 +1144,7 @@ class TestLifFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_openfile(self):
         """Test LifFile with fsspec OpenFile."""
-        file = fsspec.open(self.fname)
+        file = fsspec.open(self.filename)
         with LifFile(file) as lif:
             self.validate(lif)
         file.close()
@@ -1069,7 +1152,7 @@ class TestLifFile:
     @pytest.mark.skipif(fsspec is None, reason='fsspec not installed')
     def test_fsspec_localfileopener(self):
         """Test LifFile with fsspec LocalFileOpener."""
-        with fsspec.open(self.fname) as file, LifFile(file) as lif:
+        with fsspec.open(self.filename) as file, LifFile(file) as lif:
             self.validate(lif)
 
 
@@ -1083,36 +1166,90 @@ def test_not_lif():
         imread(ValueError)
 
 
-@pytest.mark.parametrize('asxarray', [False, True])
-def test_imread(asxarray):
-    """Test imread function."""
-    filename = DATA / 'ScanModesExamples.lif'
-
-    data = imread(filename, image=5, out=None, asxarray=asxarray)
+@pytest.mark.parametrize(
+    ('asxarray', 'selection', 'squeeze', 'expected_sizes', 'expected_sum'),
+    [
+        (
+            False,
+            None,
+            True,
+            {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128},
+            27141756,
+        ),
+        (
+            True,
+            None,
+            True,
+            {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128},
+            27141756,
+        ),
+        (
+            False,
+            {'Z': [1, 2], 'T': slice(1, 6), 'C': 1},
+            True,
+            {'Z': 2, 'T': 5, 'Y': 128, 'X': 128},
+            6374235,
+        ),
+        (
+            True,
+            {'Z': [1, 2], 'T': slice(1, 6), 'C': 1},
+            True,
+            {'Z': 2, 'T': 5, 'Y': 128, 'X': 128},
+            6374235,
+        ),
+        (
+            False,
+            {'Z': [1, 2], 'T': slice(1, 6), 'C': 1},
+            False,
+            {'Z': 2, 'T': 5, 'C': 1, 'Y': 128, 'X': 128},
+            6374235,
+        ),
+        (
+            True,
+            {'Z': [1, 2], 'T': slice(1, 6), 'C': 1},
+            False,
+            {'Z': 2, 'T': 5, 'C': 1, 'Y': 128, 'X': 128},
+            6374235,
+        ),
+    ],
+)
+def test_imread(
+    asxarray, selection, squeeze, expected_sizes, expected_sum, scanmodes_file
+):
+    """Test imread function with various parameters."""
+    data = imread(
+        scanmodes_file,
+        image=5,
+        selection=selection,
+        squeeze=squeeze,
+        out=None,
+        asxarray=asxarray,
+    )
     if asxarray:
         assert isinstance(data, DataArray)
-        assert data.sizes == {'T': 7, 'Z': 5, 'C': 2, 'Y': 128, 'X': 128}
+        assert data.sizes == expected_sizes
         data = data.data
     else:
         assert isinstance(data, numpy.ndarray)
-    assert data.shape == (7, 5, 2, 128, 128)
-    assert data.sum(dtype=numpy.uint32) == 27141756
+    assert data.shape == tuple(expected_sizes.values())
+    assert data.sum(dtype=numpy.uint32) == expected_sum
 
 
 @pytest.mark.parametrize('filetype', [str, io.BytesIO])
-def test_lif(filetype):
+def test_lif(filetype, scanmodes_file):
     """Test LIF file."""
-    filename = DATA / 'ScanModesExamples.lif'
     file = (
-        filename if filetype is str else open(filename, 'rb')  # noqa: SIM115
+        scanmodes_file
+        if filetype is str
+        else open(scanmodes_file, 'rb')  # noqa: SIM115
     )
 
     with LifFile(file, mode='r+b', squeeze=True) as lif:
         str(lif)
         assert lif.parent is None
         if filetype is str:
-            assert lif.filename == str(filename.name)
-            assert lif.dirname == str(filename.parent)
+            assert lif.filename == str(scanmodes_file.name)
+            assert lif.dirname == str(scanmodes_file.parent)
         assert not lif.filehandle.closed
         assert lif.name == 'ScanModiBeispiele.lif'
         assert lif.version == 2
@@ -1209,7 +1346,10 @@ def test_lif(filetype):
         assert memory_block.id == 'MemBlock_29'
         assert memory_block.offset == 6639225
         assert memory_block.size == 1146880
+        assert memory_block.type == LifMemoryBlockType.MEM
         assert memory_block.read() == data.tobytes()
+
+        _assert_frames(im, xdata.data)
 
         if filetype is str:
             lif.close()
@@ -1312,21 +1452,24 @@ def test_lof():
         assert memory_block.id == 'MemBlock_1199'
         assert memory_block.offset == 62
         assert memory_block.size == 46080000
+        assert memory_block.type == LifMemoryBlockType.MEM
         assert memory_block.read() == data.tobytes()
+
+        _assert_frames(im, xdata.data)
 
 
 @pytest.mark.parametrize(
-    'name',
+    ('name', 'block_type'),
     [
-        '16_18--Proj_LOF001',  # old-style LOF
-        '19_37--Proj_TIF_uncompressed001',
-        '20_09--Proj_TIF_lossless001',
-        '20_38--Proj_BMP001',
-        '21_19--Proj_JPEG_Quality_60%001',
-        '21_51--Proj_PNG001',
+        ('16_18--Proj_LOF001', LifMemoryBlockType.LOF),  # old-style LOF
+        ('19_37--Proj_TIF_uncompressed001', LifMemoryBlockType.TIF),
+        ('20_09--Proj_TIF_lossless001', LifMemoryBlockType.TIF),
+        ('20_38--Proj_BMP001', LifMemoryBlockType.BMP),
+        ('21_19--Proj_JPEG_Quality_60%001', LifMemoryBlockType.JPG),
+        ('21_51--Proj_PNG001', LifMemoryBlockType.PNG),
     ],
 )
-def test_xlif(name):
+def test_xlif(name, block_type):
     """Test XLIF file."""
     filename = (
         DATA
@@ -1423,7 +1566,10 @@ def test_xlif(name):
         assert memory_block.id == ''
         assert memory_block.offset == -1
         assert memory_block.size == 5242880
+        assert memory_block.type == block_type
         assert memory_block.read() == data.tobytes()
+
+        _assert_frames(im, xdata.data)
 
 
 @pytest.mark.parametrize('name', ['LOF', 'TIF'])
@@ -1440,7 +1586,14 @@ def test_xlif_lof(name):
         assert xlif.type == LifFileType.XLIF
         str(xlif)
 
-        xdata = xlif.images[0].asxarray(mode='r', out='memmap')
+        image = xlif.images[0]
+        str(image)
+
+        assert image.memory_block.type == (
+            LifMemoryBlockType.LOF if name == 'LOF' else LifMemoryBlockType.TIF
+        )
+
+        xdata = image.asxarray(mode='r', out='memmap')
         assert isinstance(xdata, xarray.DataArray)
         assert isinstance(xdata.data, numpy.memmap), type(xdata.data)
         assert xdata.name == 'z then lambda'
@@ -1454,6 +1607,8 @@ def test_xlif_lof(name):
             'S': 3,
         }
         assert xdata.values.sum(dtype=numpy.uint64) == 6270530156
+
+        _assert_frames(image, xdata.data)
 
         assert len(xlif.children) == 1
         xlif.close()
@@ -1530,6 +1685,15 @@ def test_xlef(name):
         rgb = data.sum(dtype=numpy.uint64, axis=(0, 1)).tolist()
         assert rgb == [146107764, 141298533, 133919392]
 
+        assert im.memory_block.type == (
+            LifMemoryBlockType.LOF if 'LOF' in name else LifMemoryBlockType.TIF
+        )
+        if im.memory_block.type == LifMemoryBlockType.LOF:
+            assert im._lof_reference is not None
+            assert not im._lof_reference.filehandle.closed
+
+        _assert_frames(im, data)
+
         xdata = im.asxarray()
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
@@ -1605,6 +1769,8 @@ def test_lifext():
         assert isinstance(data, numpy.memmap), type(data)
         assert data.sum(dtype=numpy.uint64) == 180034506
 
+        _assert_frames(im, data)
+
         xdata = im.asxarray(mode='r', out=None)
         assert isinstance(xdata, xarray.DataArray)
         assert_array_equal(xdata.data, data)
@@ -1620,16 +1786,16 @@ def test_lifext():
         assert memory_block.id == 'MemBlock_838'
         assert memory_block.offset == 19222545
         assert memory_block.size == 4800000
+        assert memory_block.type == LifMemoryBlockType.MEM
         assert memory_block.read() == data.tobytes()
 
 
 @pytest.mark.parametrize('index', range(len(SCANMODES)))
-def test_scan_modes(index):
+def test_scan_modes(index, scanmodes_file):
     """Test scan modes."""
-    filename = DATA / 'ScanModesExamples.lif'
     path, sizes, dtype = SCANMODES[index]
     shape = tuple(sizes.values())
-    with LifFile(filename, squeeze=False) as lif:
+    with LifFile(scanmodes_file, squeeze=False) as lif:
         image = lif.images[index]
         assert image.path == path
         assert image.sizes == sizes
@@ -1640,10 +1806,12 @@ def test_scan_modes(index):
         assert data.shape == shape
         assert data.dtype == dtype
 
+        _assert_frames(image, data.data)
+
     if 1 in sizes.values():
         sizes = {k: v for k, v in sizes.items() if v > 1}
         shape = tuple(sizes.values())
-        with LifFile(filename) as lif:
+        with LifFile(scanmodes_file) as lif:
             image = lif.images[index]
             assert image.path == path
             assert image.sizes == sizes
@@ -1652,6 +1820,472 @@ def test_scan_modes(index):
             data = image.asxarray()
             assert data.shape == shape
             assert data.dtype == dtype
+
+            _assert_frames(image, data.data)
+
+
+def test_frame_indices_errors(scanmodes_file):
+    """Test frames selection raises appropriate errors."""
+    with LifFile(scanmodes_file) as lif:
+        # use XYZT which has T, Z, C dimensions outside frame
+        image = lif.images['XYZT']
+        assert 'T' in image.sizes
+        assert 'Z' in image.sizes
+
+        # unknown dimension raises KeyError
+        with pytest.raises(KeyError):
+            image.frames(Q=0)
+
+        # out of bounds index raises IndexError
+        # (triggers when accessing _info)
+        with pytest.raises(IndexError):
+            len(image.frames(T=100))
+
+        # out of bounds in sequence raises IndexError
+        # (triggers when accessing _info)
+        with pytest.raises(IndexError):
+            len(image.frames(T=[0, 100]))
+
+
+@pytest.mark.parametrize(
+    ('name', 'expected_frame_dims'),
+    [
+        # ZX frame (no Y dimension)
+        ('Mark_and_Find_XZLambdaT/Position7007', ('Z', 'X')),
+        ('SequenceLambda/Job_XZL096', ('Z', 'X')),
+        ('Mark_and_Find_XZT/Position7007', ('Z', 'X')),
+        # TX frame (time-space)
+        ('Mark_and_Find_XT/Position7007', ('T', 'X')),
+    ],
+)
+def test_frame_dims_unusual(scanmodes_file, name, expected_frame_dims):
+    """Test frame_dims for unusual dimension orders (ZX, TX instead of YX)."""
+    with LifFile(scanmodes_file, squeeze=True) as lif:
+        image = lif.images[name]
+        frame_dims = image.frames.frame_dims
+        assert frame_dims == expected_frame_dims
+        assert len(frame_dims) == 2
+        _assert_frames(image, image.asarray())
+
+
+def test_frame_method():
+    """Test frame method returns correct single frames."""
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        data = image.asarray()
+
+        assert image.sizes == {'C': 4, 'Z': 10, 'Y': 1024, 'X': 1024}
+
+        # test default indices (all zeros)
+        frame = image.frame()
+        assert frame.shape == (1024, 1024)
+        assert_array_equal(frame, data[0, 0])
+
+        # test specified indices
+        frame = image.frame(C=1, Z=3)
+        assert frame.shape == (1024, 1024)
+        assert_array_equal(frame, data[1, 3])
+
+        # test partial indices (unspecified default to 0)
+        frame = image.frame(Z=5)
+        assert_array_equal(frame, data[0, 5])
+
+        # test out parameter
+        out = numpy.zeros((1024, 1024), dtype=image.dtype)
+        result = image.frame(C=2, Z=7, out=out)
+        assert result is out
+        assert_array_equal(result, data[2, 7])
+
+        # test errors
+        with pytest.raises(KeyError):
+            image.frame(Q=0)
+
+        with pytest.raises(IndexError):
+            image.frame(C=100)
+
+
+def test_frames_iteration_order():
+    """Test frames() iteration order follows keyword argument order."""
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        frames = image.frames
+
+        assert image.ndim == 4
+        assert image.dims == ('C', 'Z', 'Y', 'X')
+        assert image.shape == (4, 10, 1024, 1024)
+
+        assert frames.ndim == 4
+        assert frames.dims == ('C', 'Z', 'Y', 'X')
+        assert frames.shape == (4, 10, 1024, 1024)
+        assert frames is frames()  # no selection returns self
+
+        # default order: natural dimension order (C, Z)
+        # dims = ('C', 'Z'), so tuple is (C_idx, Z_idx)
+        indices_default = list(frames.keys())
+        assert indices_default[0] == (0, 0)  # C=0, Z=0
+        assert indices_default[1] == (0, 1)  # C=0, Z=1
+        assert indices_default[10] == (1, 0)  # C=1, Z=0
+
+        # specify Z first, then C: unspecified=[], specified=['Z', 'C']
+        # dims = ('Z', 'C'), so tuple is (Z_idx, C_idx)
+        frames_zc = frames(Z=None, C=None)
+        indices_zc = list(frames_zc.keys())
+        assert frames_zc is not frames  # selection returns new object
+        assert frames_zc.shape == (10, 4, 1024, 1024)
+        assert frames_zc.dims == ('Z', 'C', 'Y', 'X')
+        assert frames_zc._info.dims == ('Z', 'C')
+        assert indices_zc[0] == (0, 0)  # Z=0, C=0
+        assert indices_zc[1] == (0, 1)  # Z=0, C=1
+        assert indices_zc[4] == (1, 0)  # Z=1, C=0
+
+        # specify C first, then Z: unspecified=[], specified=['C', 'Z']
+        # dims = ('C', 'Z'), same as default
+        frames_cz = frames(C=None, Z=None)
+        indices_cz = list(frames_cz.keys())
+        assert frames_cz.shape == (4, 10, 1024, 1024)
+        assert frames_cz.dims == ('C', 'Z', 'Y', 'X')
+        assert frames_cz._info.dims == ('C', 'Z')
+        assert indices_cz == indices_default
+
+        # specify only Z: unspecified=['C'], specified=['Z']
+        # dims = ('C', 'Z'), same as default
+        frames_z_only = frames(Z=None)
+        indices_z_only = list(frames_z_only.keys())
+        assert frames_z_only.shape == (4, 10, 1024, 1024)
+        assert frames_z_only.dims == ('C', 'Z', 'Y', 'X')
+        assert frames_z_only._info.dims == ('C', 'Z')
+        assert indices_z_only == indices_default
+
+        # specify only C: unspecified=['Z'], specified=['C']
+        # dims = ('Z', 'C'), so tuple is (Z_idx, C_idx)
+        frames_c_only = frames(C=None)
+        indices_c_only = list(frames_c_only.keys())
+        assert frames_c_only.shape == (10, 4, 1024, 1024)
+        assert frames_c_only.dims == ('Z', 'C', 'Y', 'X')
+        assert frames_c_only._info.dims == ('Z', 'C')
+        assert indices_c_only[0] == (0, 0)  # Z=0, C=0
+        assert indices_c_only[1] == (0, 1)  # Z=0, C=1
+        assert indices_c_only[4] == (1, 0)  # Z=1, C=0
+
+
+def test_frames_selection_types():
+    """Test frames() with different selection types."""
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        frames = image.frames
+        data = image.asarray()
+
+        assert image.ndim == 4
+        assert image.dims == ('C', 'Z', 'Y', 'X')
+        assert image.shape == (4, 10, 1024, 1024)
+
+        assert frames.ndim == 4
+        assert frames.dims == ('C', 'Z', 'Y', 'X')
+        assert frames.shape == (4, 10, 1024, 1024)
+
+        # check that image has coords for spatial dimensions
+        assert 'Y' in image.coords
+        assert 'X' in image.coords
+        assert 'Z' in image.coords
+        assert len(image.coords['Z']) == 10
+        assert len(image.coords['Y']) == 1024
+        assert len(image.coords['X']) == 1024
+
+        # full frames should have same coords
+        assert 'Y' in frames.coords
+        assert 'X' in frames.coords
+        assert 'Z' in frames.coords
+        assert_array_equal(frames.coords['Z'], image.coords['Z'])
+        assert_array_equal(frames.coords['Y'], image.coords['Y'])
+        assert_array_equal(frames.coords['X'], image.coords['X'])
+
+        # int selection (fixed index)
+        # C is fixed at 1, only Z iterates
+        # dims = ('Z',), so tuple is (Z_local_idx,)
+        frames_c1 = image.frames(C=1)
+        assert len(frames_c1) == 10  # all Z values
+        assert frames_c1.ndim == 3
+        assert frames_c1.shape == (10, 1024, 1024)
+        assert frames_c1.dims == ('Z', 'Y', 'X')
+        assert frames_c1._info.dims == ('Z',)
+        assert frames_c1 is not frames  # selection returns new object
+        # coords should be indexed: Z has all values, Y and X unchanged
+        assert_array_equal(frames_c1.coords['Z'], image.coords['Z'])
+        assert_array_equal(frames_c1.coords['Y'], image.coords['Y'])
+        assert_array_equal(frames_c1.coords['X'], image.coords['X'])
+        for i, (nd_idx, frame) in enumerate(frames_c1.items()):
+            assert nd_idx == (i,)  # local index
+            # Convert to global: C=1 (fixed), Z=i (iterates 0..9)
+            assert_array_equal(frame, data[1, i])
+
+        # slice selection
+        # Both C and Z specified with slices
+        # dims = ('C', 'Z') since C specified first
+        # Local indices are (C_local, Z_local) where both start from 0
+        frames_slice = image.frames(C=slice(0, 2), Z=slice(2, 5))
+        assert len(frames_slice) == 6  # 2 * 3
+        assert frames_slice.shape == (2, 3, 1024, 1024)
+        assert frames_slice.dims == ('C', 'Z', 'Y', 'X')
+        assert frames_slice._info.dims == ('C', 'Z')
+        # coords should be sliced: Z has indices 2:5, Y and X unchanged
+        assert len(frames_slice.coords['Z']) == 3
+        assert_array_equal(frames_slice.coords['Z'], image.coords['Z'][2:5])
+        assert_array_equal(frames_slice.coords['Y'], image.coords['Y'])
+        assert_array_equal(frames_slice.coords['X'], image.coords['X'])
+        expected_indices = [
+            (0, 0),  # C_local=0 (C_global=0), Z_local=0 (Z_global=2)
+            (0, 1),  # C_local=0 (C_global=0), Z_local=1 (Z_global=3)
+            (0, 2),  # C_local=0 (C_global=0), Z_local=2 (Z_global=4)
+            (1, 0),  # C_local=1 (C_global=1), Z_local=0 (Z_global=2)
+            (1, 1),  # C_local=1 (C_global=1), Z_local=1 (Z_global=3)
+            (1, 2),  # C_local=1 (C_global=1), Z_local=2 (Z_global=4)
+        ]
+        assert list(frames_slice.keys()) == expected_indices
+
+        # sequence selection
+        z_indices = [9, 5, 2, 0]
+        # C is fixed at 0, Z iterates through sequence
+        # dims = ('Z',)
+        frames_seq = image.frames(C=0, Z=z_indices)
+        assert len(frames_seq) == 4
+        assert frames_seq.shape == (4, 1024, 1024)
+        assert frames_seq.dims == ('Z', 'Y', 'X')
+        assert frames_seq._info.dims == ('Z',)
+        # coords should be indexed by sequence: Z has indices [9, 5, 2, 0]
+        assert len(frames_seq.coords['Z']) == 4
+        assert_array_equal(
+            frames_seq.coords['Z'], image.coords['Z'][z_indices]
+        )
+        assert_array_equal(frames_seq.coords['Y'], image.coords['Y'])
+        assert_array_equal(frames_seq.coords['X'], image.coords['X'])
+        for i, (nd_idx, frame) in enumerate(frames_seq.items()):
+            assert nd_idx == (i,)  # local index 0, 1, 2, 3
+            # Global Z index from sequence
+            assert_array_equal(frame, data[0, z_indices[i]])
+
+        # None selection (iterate all)
+        assert len(image.frames(C=None)) == len(image.frames)
+
+        # mixed selection
+        # C fixed at 1, Z iterates through sequence
+        # dims = ('Z',)
+        frames_mixed = image.frames(C=1, Z=[2, 5, 7])
+        assert len(frames_mixed) == 3
+        assert frames_mixed.shape == (3, 1024, 1024)
+        assert frames_mixed.dims == ('Z', 'Y', 'X')
+        assert frames_mixed._info.dims == ('Z',)
+        # coords should be indexed by sequence: Z has indices [2, 5, 7]
+        assert len(frames_mixed.coords['Z']) == 3
+        assert_array_equal(
+            frames_mixed.coords['Z'], image.coords['Z'][[2, 5, 7]]
+        )
+        assert_array_equal(frames_mixed.coords['Y'], image.coords['Y'])
+        assert_array_equal(frames_mixed.coords['X'], image.coords['X'])
+        expected_mixed = [
+            (0,),  # Z_local=0 (Z_global=2)
+            (1,),  # Z_local=1 (Z_global=5)
+            (2,),  # Z_local=2 (Z_global=7)
+        ]
+        assert list(frames_mixed.keys()) == expected_mixed
+
+
+def test_frames_get_method():
+    """Test frames.get() method with default values."""
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        data = image.asarray()
+        frames = image.frames
+
+        # valid linear index returns frame
+        frame = frames.get(0)
+        assert frame is not None
+        assert_array_equal(frame, data[0, 0])
+
+        # valid ND tuple index returns frame
+        frame = frames.get((1, 5))
+        assert frame is not None
+        assert_array_equal(frame, data[1, 5])
+
+        # out of bounds linear index returns default
+        result = frames.get(999)
+        assert result is None
+
+        # out of bounds linear index with custom default
+        default_arr = numpy.zeros((10, 10))
+        result = frames.get(999, default=default_arr)
+        assert result is default_arr
+
+        # out of bounds ND index returns default
+        result = frames.get((100, 100))
+        assert result is None
+
+        # wrong length ND index returns default
+        result = frames.get((1, 2, 3))
+        assert result is None
+
+        # invalid type returns default
+        result = frames.get('invalid')
+        assert result is None
+
+        # custom default value
+        custom_default = numpy.array([42])
+        result = frames.get(999, default=custom_default)
+        assert result is custom_default
+
+        # test with selection
+        frames_sub = image.frames(C=1)
+        frame = frames_sub.get(0)
+        assert frame is not None
+        assert_array_equal(frame, data[1, 0])
+
+        result = frames_sub.get(100)
+        assert result is None
+
+
+def test_frames_unravel_ravel():
+    """Test unravel_index and ravel_multi_index methods."""
+    filename = DATA / 'image.sc_107410/Edu_examples.lif'
+    with LifFile(filename) as lif:
+        image = lif.images[0]
+        # image.sizes = {'C': 4, 'Z': 10, 'Y': 1024, 'X': 1024}
+        frames = image.frames
+
+        # test unravel_index with local indices
+        nd_idx = frames.unravel_index(0, global_=False)
+        assert nd_idx == (0, 0)  # C=0, Z=0
+
+        nd_idx = frames.unravel_index(1, global_=False)
+        assert nd_idx == (0, 1)  # C=0, Z=1
+
+        nd_idx = frames.unravel_index(10, global_=False)
+        assert nd_idx == (1, 0)  # C=1, Z=0
+
+        nd_idx = frames.unravel_index(39, global_=False)
+        assert nd_idx == (3, 9)  # C=3, Z=9 (last frame)
+
+        # test unravel_index with global indices (same as local here)
+        nd_idx = frames.unravel_index(0, global_=True)
+        assert nd_idx == (0, 0)
+
+        nd_idx = frames.unravel_index(39, global_=True)
+        assert nd_idx == (3, 9)
+
+        # test ravel_multi_index with local indices
+        linear = frames.ravel_multi_index((0, 0), global_=False)
+        assert linear == 0
+
+        linear = frames.ravel_multi_index((0, 1), global_=False)
+        assert linear == 1
+
+        linear = frames.ravel_multi_index((1, 0), global_=False)
+        assert linear == 10
+
+        linear = frames.ravel_multi_index((3, 9), global_=False)
+        assert linear == 39
+
+        # test ravel_multi_index with global indices (same as local here)
+        linear = frames.ravel_multi_index((0, 0), global_=True)
+        assert linear == 0
+
+        linear = frames.ravel_multi_index((3, 9), global_=True)
+        assert linear == 39
+
+        # test round-trip conversion
+        for i in range(len(frames)):
+            nd_local = frames.unravel_index(i, global_=False)
+            linear_back = frames.ravel_multi_index(nd_local, global_=False)
+            assert linear_back == i
+
+            nd_global = frames.unravel_index(i, global_=True)
+            linear_back = frames.ravel_multi_index(nd_global, global_=True)
+            assert linear_back == i
+
+        # test with slice selection
+        frames_slice = image.frames(C=slice(1, 3), Z=slice(2, 5))
+        # Local shape: (2, 3) for C and Z
+        # Global: C=[1,2], Z=[2,3,4]
+
+        # local index (0, 0) -> global (1, 2)
+        nd_local = frames_slice.unravel_index(0, global_=False)
+        assert nd_local == (0, 0)
+        nd_global = frames_slice.unravel_index(0, global_=True)
+        assert nd_global == (1, 2)
+
+        # local index (1, 2) -> global (2, 4)
+        nd_local = frames_slice.unravel_index(5, global_=False)
+        assert nd_local == (1, 2)
+        nd_global = frames_slice.unravel_index(5, global_=True)
+        assert nd_global == (2, 4)
+
+        # ravel with local indices
+        linear = frames_slice.ravel_multi_index((0, 0), global_=False)
+        assert linear == 0
+
+        linear = frames_slice.ravel_multi_index((1, 2), global_=False)
+        assert linear == 5
+
+        # ravel with global indices
+        linear = frames_slice.ravel_multi_index((1, 2), global_=True)
+        assert linear == 0
+
+        linear = frames_slice.ravel_multi_index((2, 4), global_=True)
+        assert linear == 5
+
+        # test with sequence selection
+        frames_seq = image.frames(C=0, Z=[9, 5, 2, 0])
+        # Local shape: (4,) for Z
+        # Global: Z=[9, 5, 2, 0]
+
+        nd_local = frames_seq.unravel_index(0, global_=False)
+        assert nd_local == (0,)
+        nd_global = frames_seq.unravel_index(0, global_=True)
+        assert nd_global == (9,)
+
+        nd_local = frames_seq.unravel_index(3, global_=False)
+        assert nd_local == (3,)
+        nd_global = frames_seq.unravel_index(3, global_=True)
+        assert nd_global == (0,)
+
+        linear = frames_seq.ravel_multi_index((0,), global_=False)
+        assert linear == 0
+
+        linear = frames_seq.ravel_multi_index((9,), global_=True)
+        assert linear == 0
+
+        linear = frames_seq.ravel_multi_index((0,), global_=True)
+        assert linear == 3
+
+        # test error conditions for unravel_index
+        with pytest.raises(IndexError):
+            frames.unravel_index(-1, global_=False)
+
+        with pytest.raises(IndexError):
+            frames.unravel_index(1000, global_=False)
+
+        # test error conditions for ravel_multi_index
+        # wrong length
+        with pytest.raises(ValueError):
+            frames.ravel_multi_index((0, 0, 0), global_=False)
+
+        # out of bounds local index
+        with pytest.raises(IndexError):
+            frames.ravel_multi_index((10, 0), global_=False)
+
+        # out of bounds global index
+        with pytest.raises(IndexError):
+            frames.ravel_multi_index((10, 0), global_=True)
+
+        # global index not in slice range
+        with pytest.raises(IndexError):
+            frames_slice.ravel_multi_index((0, 0), global_=True)
+
+        # global index not in sequence
+        with pytest.raises(IndexError):
+            frames_seq.ravel_multi_index((1,), global_=True)
 
 
 @pytest.mark.parametrize(
@@ -1706,10 +2340,17 @@ def test_flim(name):
             assert len(flim.memory_block.read()) == 15502568
         with pytest.raises(NotImplementedError):
             flim.asxarray()
+        with pytest.raises(NotImplementedError):
+            _ = flim.frames
 
         intensity = lif.images['/Intensity']
         assert intensity in flim.child_images
         assert intensity.parent_image is flim
+        mbtype = intensity.memory_block.type
+        if '.lif' in name:
+            assert mbtype == LifMemoryBlockType.MEM
+        else:
+            assert mbtype == LifMemoryBlockType.LOF
 
         data = intensity.asxarray()
         assert data.shape == (1024, 1024)
@@ -1728,6 +2369,18 @@ def test_flim(name):
         real = lif.images['Phasor Real']
         assert real in flim.child_images
         assert real.parent_image is flim
+
+        mbtype = real.memory_block.type
+        if '.lif' in name:
+            assert mbtype == LifMemoryBlockType.MEM
+        elif 'LOF' in name:
+            assert mbtype == LifMemoryBlockType.LOF
+        elif 'TIF' in name:
+            assert mbtype == LifMemoryBlockType.LOF  # not TIFF
+        elif 'AIVIA' in name:
+            assert mbtype == LifMemoryBlockType.AIVIA
+        elif 'OME' in name:
+            assert mbtype == LifMemoryBlockType.OME
 
         data = real.asxarray()
         assert data.shape == (1024, 1024)
@@ -1771,6 +2424,22 @@ def test_flim_nd(name):
             str(image)
 
         base = lif.images['Series006 Crop']
+        assert isinstance(base, LifImage)
+        assert base.parent_image is None
+        assert len(base.child_images) == 1
+        assert base.uuid == '2dbe7657-c99c-11ee-b559-98597a5338f0'
+        assert not base.is_flim
+        assert base.dtype == numpy.uint8
+        assert base.sizes == {'T': 10, 'Z': 10, 'C': 2, 'Y': 2048, 'X': 2048}
+        if '.xlef' in name:
+            assert base.memory_block.type == LifMemoryBlockType.OME
+            assert base._tif_reference is not None
+            assert not base._tif_reference.filehandle.closed
+        else:
+            assert base.memory_block.type == LifMemoryBlockType.MEM
+            assert base._tif_reference is None
+
+        _assert_frames(base, base.asarray())
 
         flim = lif.images['Series006$']
         assert isinstance(flim, LifImageABC)
@@ -1806,6 +2475,8 @@ def test_flim_nd(name):
         assert len(flim.memory_block.read()) == 1004310116
         with pytest.raises(NotImplementedError):
             flim.asxarray()
+        with pytest.raises(NotImplementedError):
+            _ = flim.frames
 
         lifetime = lif.images['Fast Flim']
         assert lifetime in flim.child_images
@@ -1814,6 +2485,7 @@ def test_flim_nd(name):
         assert data.shape == (10, 2, 10, 2048, 2048)
         assert data.dtype == numpy.float16
         assert data.attrs['F16']['FactorF32ToF16'] == 1000000000.0
+        _assert_frames(lifetime, data.data)
 
 
 def test_flim_lof():
@@ -1879,10 +2551,17 @@ def test_rgb():
             [12387812, 9225469, 82284132],
         )
 
+        frames = image.frames
+        assert frames.frame_shape == (1536, 2048, 3)
+        assert frames.frame_dims == ('Y', 'X', 'S')
+        _assert_frames(image, data)
+
         image = lif.images[1]
         assert image.sizes == {'Y': 1536, 'X': 2048, 'S': 3}
         data = image.asarray()
         assert data.sum(dtype=numpy.uint64) == 86724120
+
+        _assert_frames(image, data)
 
 
 def test_rgb_pad():
@@ -1891,18 +2570,24 @@ def test_rgb_pad():
     with LifFile(filename) as lif:
         assert len(lif.images) == 20
         for i, image in enumerate(lif.images):
+            frames = image.frames
             assert image.dtype == numpy.uint8
             if i % 4 == 0:
                 assert image.sizes == {'C': 2, 'Y': 2048, 'X': 2048}
+                assert frames.frame_sizes == {'Y': 2048, 'X': 2048}
                 data = image.asxarray()
             elif i == 9:
                 assert image.sizes == {'Y': 1075, 'X': 1075, 'S': 3}
+                assert frames.frame_sizes == image.sizes
                 data = image.asxarray()
                 assert data.shape == (1075, 1075, 3)
             else:
                 assert image.sizes == {'Y': 531, 'X': 531, 'S': 3}
+                assert frames.frame_sizes == image.sizes
                 data = image.asxarray()
                 assert data.shape == (531, 531, 3)
+
+            _assert_frames(image, data)
 
         # out parameter doesn't work as expected
         out = numpy.zeros((531, 532, 3), numpy.uint8)
@@ -1930,6 +2615,8 @@ def test_issue_memoryblocks():
         data = image.asxarray()
         assert data.shape == (4, 10, 1024, 1024)
 
+        _assert_frames(image, data.values)
+
         memblock = lif.memory_blocks['MemBlock_102']
         assert memblock.offset == 195097
         assert memblock.size == 41943040
@@ -1940,14 +2627,16 @@ def test_issue_memoryblocks():
 
 
 @pytest.mark.parametrize('asxarray', [False, True])
-@pytest.mark.parametrize('output', ['ndarray', 'memmap', 'memmap:.', 'fname'])
+@pytest.mark.parametrize(
+    'output', ['ndarray', 'memmap', 'memmap:.', 'filename']
+)
 def test_output(output, asxarray):
     """Test out parameter, including memmap."""
     filename = DATA / 'zenodo_3382102/y293-Gal4_vmat-GFP-f01.lif'
 
     if output == 'ndarray':
         out = numpy.zeros((86, 2, 500, 616), numpy.uint16)
-    elif output == 'fname':
+    elif output == 'filename':
         out = tempfile.TemporaryFile()  # noqa: SIM115
     elif output == 'memmap:.':
         out = output
@@ -1964,7 +2653,7 @@ def test_output(output, asxarray):
     else:
         assert isinstance(im, numpy.memmap)
     assert im[:, 1, 200, 300].sum(axis=0) == 1364
-    if output == 'fname':
+    if output == 'filename':
         out.close()
 
 
@@ -2034,19 +2723,18 @@ def test_phasor_from_lif():
         phasor_from_lif(filename)
 
 
-def test_signal_from_lif():
+def test_signal_from_lif(scanmodes_file):
     """Test PhasorPy signal_from_lif function."""
     from phasorpy.io import signal_from_lif
 
-    filename = DATA / 'ScanModesExamples.lif'
-    signal = signal_from_lif(filename)
+    signal = signal_from_lif(scanmodes_file)
     assert signal.dims == ('C', 'Y', 'X')
     assert signal.shape == (9, 128, 128)
     assert signal.dtype == numpy.uint8
     assert_allclose(signal.coords['C'].data[[0, 1]], [560.0, 580.0])
 
     # select series
-    signal = signal_from_lif(filename, image='XYZLambdaT')
+    signal = signal_from_lif(scanmodes_file, image='XYZLambdaT')
     assert signal.dims == ('T', 'C', 'Z', 'Y', 'X')
     assert signal.shape == (7, 9, 5, 128, 128)
     assert_allclose(signal.coords['C'].data[[0, 1]], [560.0, 580.0])
@@ -2056,14 +2744,14 @@ def test_signal_from_lif():
     )
 
     # select excitation
-    signal = signal_from_lif(filename, dim='Λ')
+    signal = signal_from_lif(scanmodes_file, dim='Λ')
     assert signal.dims == ('C', 'Y', 'X')
     assert signal.shape == (10, 128, 128)
     assert_allclose(signal.coords['C'].data[[0, 1]], [470.0, 492.0])
 
     # series does not contain dim
     with pytest.raises(ValueError):
-        signal_from_lif(filename, image='XYZLambdaT', dim='Λ')
+        signal_from_lif(scanmodes_file, image='XYZLambdaT', dim='Λ')
 
     # file does not contain hyperspectral signal
     filename = DATA / 'FLIM_testdata/FLIM_testdata.lif'
@@ -2115,18 +2803,18 @@ def test_gil_enabled():
 
 
 @pytest.mark.parametrize(
-    'fname',
+    'filename',
     itertools.chain.from_iterable(
         glob.glob(f'**/*{ext}', root_dir=DATA, recursive=True)
         for ext in FILE_EXTENSIONS
     ),
 )
-def test_glob(fname):
+def test_glob(filename):
     """Test read all LIF files."""
-    if 'defective' in fname:
+    if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
-    fname = DATA / fname
-    with LifFile(fname) as lif:
+    filename = DATA / filename
+    with LifFile(filename) as lif:
         str(lif)
         if lif.type == LifFileType.LIFEXT:
             assert len(lif.images) > 0
@@ -2150,7 +2838,7 @@ def test_glob(fname):
             _ = image.timestamps
             for ax in 'QA?':
                 if ax in image.dims:
-                    msg = f'unexpected dimension {ax} in file {fname}'
+                    msg = f'unexpected dimension {ax!r} in file {filename!r}'
                     raise ValueError(msg)
 
 
