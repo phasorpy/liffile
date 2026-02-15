@@ -12,7 +12,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.1.22
+:Version: 2026.2.15
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -34,16 +34,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.12.0 (recommended)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28
+  (required for reading multi-page TIFF)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
 
 Revisions
 ---------
+
+2026.2.15
+
+- Add experimental frame-based interface to LifImage.
+- Fix code review issues.
 
 2026.1.22
 
@@ -144,9 +150,8 @@ This library is in its early stages of development. It is not feature-complete.
 Large, backwards-incompatible changes may occur between revisions.
 
 Specifically, the following features are currently not supported:
-XLLF formats, image mosaics and pyramids, partial image reads,
-reading non-image data such as FLIM/TCSPC, heterogeneous channel data types,
-discontiguous storage, and bit increments.
+XLLF formats, image mosaics and pyramids, reading non-image data such as
+FLIM/TCSPC, and bit increments.
 
 The library has been tested with a limited number of version 2 files only.
 
@@ -172,9 +177,9 @@ Read a FLIM lifetime image and metadata from a LIF file:
     >>> with LifFile('tests/data/FLIM.lif') as lif:
     ...     for image in lif.images:
     ...         _ = image.name
-    ...     image = lif.images['Fast Flim']
-    ...     assert image.shape == (1024, 1024)
-    ...     assert image.dims == ('Y', 'X')
+    ...     image = lif.images['Fast Flim']  # by name
+    ...     assert image.dtype == 'float16'
+    ...     assert image.sizes == {'Y': 1024, 'X': 1024}
     ...     lifetimes = image.asxarray()
     ...
     >>> lifetimes
@@ -191,6 +196,26 @@ Read a FLIM lifetime image and metadata from a LIF file:
         TileScanInfo:   {'Tile': {'FieldX': 0,...
         ViewerScaling:  {'ChannelScalingInfo': {...
 
-View the image and metadata in a LIF file from the console::
+Iterate over selected XLEF image frames in ZTM dimension order:
+
+.. code-block:: python
+
+    >>> with LifFile('tests/data/XYZCST/XYZCST.xlef') as lif:
+    ...     image = lif.images[0]  # by index
+    ...     image.sizes
+    ...     frames = image.frames(C=1, Z=slice(1, 3), T=[1, 0], M=None)
+    ...     frames.sizes
+    ...     for index, frame in frames.items():
+    ...         index, frame.shape
+    ...
+    {'T': 2, 'M': 4, 'C': 3, 'Z': 5, 'Y': 1200, 'X': 1600}
+    {'Z': 2, 'T': 2, 'M': 4, 'Y': 1200, 'X': 1600}
+    ((0, 0, 0), (1200, 1600))
+    ((0, 0, 1), (1200, 1600))
+    ...
+    ((1, 1, 2), (1200, 1600))
+    ((1, 1, 3), (1200, 1600))
+
+View image and metadata in a LIF file from the console::
 
     $ python -m liffile tests/data/FLIM.lif
