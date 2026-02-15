@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.1.22
+:Version: 2026.2.15
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -61,16 +61,22 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.11, 3.14.2 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.1
+- `CPython <https://www.python.org>`_ 3.11.9, 3.12.10, 3.13.12, 3.14.3 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Xarray <https://pypi.org/project/xarray>`_ 2025.12.0 (recommended)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28
+  (required for reading multi-page TIFF)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.14 (optional)
 
 Revisions
 ---------
+
+2026.2.15
+
+- Add experimental frame-based interface to LifImage.
+- Fix code review issues.
 
 2026.1.22
 
@@ -171,9 +177,8 @@ This library is in its early stages of development. It is not feature-complete.
 Large, backwards-incompatible changes may occur between revisions.
 
 Specifically, the following features are currently not supported:
-XLLF formats, image mosaics and pyramids, partial image reads,
-reading non-image data such as FLIM/TCSPC, heterogeneous channel data types,
-discontiguous storage, and bit increments.
+XLLF formats, image mosaics and pyramids, reading non-image data such as
+FLIM/TCSPC, and bit increments.
 
 The library has been tested with a limited number of version 2 files only.
 
@@ -197,9 +202,9 @@ Read a FLIM lifetime image and metadata from a LIF file:
 >>> with LifFile('tests/data/FLIM.lif') as lif:
 ...     for image in lif.images:
 ...         _ = image.name
-...     image = lif.images['Fast Flim']
-...     assert image.shape == (1024, 1024)
-...     assert image.dims == ('Y', 'X')
+...     image = lif.images['Fast Flim']  # by name
+...     assert image.dtype == 'float16'
+...     assert image.sizes == {'Y': 1024, 'X': 1024}
 ...     lifetimes = image.asxarray()
 ...
 >>> lifetimes
@@ -216,7 +221,25 @@ Attributes...
     TileScanInfo:   {'Tile': {'FieldX': 0,...
     ViewerScaling:  {'ChannelScalingInfo': {...
 
-View the image and metadata in a LIF file from the console::
+Iterate over selected XLEF image frames in ZTM dimension order:
+
+>>> with LifFile('tests/data/XYZCST/XYZCST.xlef') as lif:
+...     image = lif.images[0]  # by index
+...     image.sizes
+...     frames = image.frames(C=1, Z=slice(1, 3), T=[1, 0], M=None)
+...     frames.sizes
+...     for index, frame in frames.items():
+...         index, frame.shape
+...
+{'T': 2, 'M': 4, 'C': 3, 'Z': 5, 'Y': 1200, 'X': 1600}
+{'Z': 2, 'T': 2, 'M': 4, 'Y': 1200, 'X': 1600}
+((0, 0, 0), (1200, 1600))
+((0, 0, 1), (1200, 1600))
+...
+((1, 1, 2), (1200, 1600))
+((1, 1, 3), (1200, 1600))
+
+View image and metadata in a LIF file from the console::
 
     $ python -m liffile tests/data/FLIM.lif
 
@@ -224,7 +247,7 @@ View the image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.1.22'
+__version__ = '2026.2.15'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -234,8 +257,10 @@ __all__ = [
     'LifFlimImage',
     'LifImage',
     'LifImageABC',
+    'LifImageFrames',
     'LifImageSeries',
     'LifMemoryBlock',
+    'LifMemoryBlockType',
     '__version__',
     'imread',
     'xml2dict',
@@ -244,6 +269,7 @@ __all__ = [
 import contextlib
 import enum
 import io
+import itertools
 import logging
 import math
 import os
@@ -266,9 +292,12 @@ if TYPE_CHECKING:
     from typing import IO, Any, ClassVar, Literal, Self
 
     from numpy.typing import DTypeLike, NDArray
+    from tifffile import TiffFile
     from xarray import DataArray
 
     OutputType = str | IO[bytes] | NDArray[Any] | None
+    SelectionValue = int | slice | Sequence[int] | None
+    SelectionType = dict[str, SelectionValue]
 
 import numpy
 
@@ -284,9 +313,10 @@ def imread(
     /,
     image: int | str = 0,
     *,
+    selection: SelectionType | None = None,
     squeeze: bool = True,
-    out: OutputType = None,
     asxarray: Literal[False] = ...,
+    out: OutputType = None,
     **kwargs: Any,
 ) -> NDArray[Any]: ...
 
@@ -297,9 +327,10 @@ def imread(
     /,
     image: int | str = 0,
     *,
+    selection: SelectionType | None = None,
     squeeze: bool = True,
-    out: OutputType = None,
     asxarray: Literal[True] = ...,
+    out: OutputType = None,
     **kwargs: Any,
 ) -> DataArray: ...
 
@@ -309,9 +340,10 @@ def imread(
     /,
     image: int | str = 0,
     *,
+    selection: SelectionType | None = None,
     squeeze: bool = True,
-    out: OutputType = None,
     asxarray: bool = False,
+    out: OutputType = None,
     **kwargs: Any,
 ) -> NDArray[Any] | DataArray:
     """Return image from file.
@@ -324,8 +356,21 @@ def imread(
         image:
             Index or name of image to return.
             By default, the first image in the file is returned.
+        selection:
+            Per-dimension selection using case-sensitive dimension codes.
+            If ``None``, return entire image.
+            Otherwise, a dict mapping dimension names to selection values:
+
+            - ``int``: Fixed index.
+            - ``slice``: Range of indices.
+            - ``Sequence[int]``: Specific indices.
+            - ``None``: All indices.
+
+            Not supported with RAW FLIM images.
         squeeze:
             Remove dimensions of length one from images.
+        asxarray:
+            Return image data as xarray.DataArray instead of numpy.ndarray.
         out:
             Specifies where to copy image data.
             If ``None``, create a new NumPy array in main memory.
@@ -334,24 +379,31 @@ def imread(
             of compatible shape and dtype.
             If a ``file name`` or ``open file``, create a memory-mapped
             array in the specified file.
-        asxarray:
-            Return image data as xarray.DataArray instead of numpy.ndarray.
         **kwargs:
-            Optional arguments to :py:meth:`LifImageABC.asarray`.
+            Optional arguments to :py:meth:`LifImageABC.asarray`,
+            :py:meth:`LifImageABC.asxarray`, or :py:meth:`LifImage.frames`.
 
     Returns:
         :
             Image data as numpy array or xarray DataArray.
 
     """
-    data: NDArray[Any] | DataArray
     with LifFile(file, squeeze=squeeze) as lif:
         im = lif.images[image]
+
+        if selection is None:
+            if asxarray:
+                return im.asxarray(out=out, **kwargs)
+            return im.asarray(out=out, **kwargs)
+
+        if isinstance(im, LifFlimImage):
+            msg = 'selection not supported with LifFlimImage'
+            raise NotImplementedError(msg)
+
+        frames = im.frames(**selection)
         if asxarray:
-            data = im.asxarray(out=out, **kwargs)
-        else:
-            data = im.asarray(out=out, **kwargs)
-    return data
+            return frames.asxarray(out=out, **kwargs)
+        return frames.asarray(out=out, **kwargs)
 
 
 class LifFileError(ValueError):
@@ -391,7 +443,8 @@ class BinaryFile:
             File name or seekable binary stream.
         mode:
             File open mode if `file` is a file name.
-            The default is 'r'. Files are always opened in binary mode.
+            If not specified, defaults to 'r'. Files are always opened
+            in binary mode.
 
     Raises:
         ValueError:
@@ -440,14 +493,14 @@ class BinaryFile:
         elif hasattr(file, 'seek'):
             # binary stream: open file, BytesIO, fsspec LocalFileOpener
             if isinstance(file, io.TextIOBase):  # type: ignore[unreachable]
-                msg = f'{file!r} is not open in binary mode'
+                msg = f'{file=!r} is not open in binary mode'
                 raise TypeError(msg)
 
             self._fh = file
             try:
                 self._fh.tell()
             except Exception as exc:
-                msg = f'{file!r} is not seekable'
+                msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
@@ -463,7 +516,7 @@ class BinaryFile:
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     self._fh.close()
-                msg = f'{file!r} is not seekable'
+                msg = f'{file=!r} is not seekable'
                 raise ValueError(msg) from exc
             if hasattr(file, 'path'):
                 self._path = os.path.normpath(file.path)
@@ -488,7 +541,7 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Path to file."""
+        """Path to file or empty if binary stream."""
         return self._path
 
     @property
@@ -523,11 +576,9 @@ class BinaryFile:
     def close(self) -> None:
         """Close file."""
         if self._close:
-            try:
-                self._closed = True
+            self._closed = True
+            with contextlib.suppress(Exception):
                 self._fh.close()
-            except Exception:  # noqa: S110
-                pass
 
     def __enter__(self) -> Self:
         return self
@@ -719,10 +770,10 @@ class LifFile(BinaryFile):
 
         try:
             self.version = int(self.xml_element.attrib['Version'])
-        except KeyError as exc:
+        except KeyError:
             if self.type != LifFileType.LOF:
                 msg = 'Version attribute not found in XML'
-                raise KeyError(msg) from exc
+                raise KeyError(msg) from None
 
         # add memory blocks
         if self.type == LifFileType.LOF:
@@ -827,6 +878,16 @@ class LifFile(BinaryFile):
         if self._close:
             for child in self.children:
                 child.close()
+        # close cached LOF and TIFF references in images
+        if hasattr(self, 'images'):
+            for image in self.images:
+                if isinstance(image, LifImage):
+                    if image._lof_reference is not None:
+                        with contextlib.suppress(Exception):
+                            image._lof_reference.close()
+                    if image._tif_reference is not None:
+                        with contextlib.suppress(Exception):
+                            image._tif_reference.close()
         super().close()
 
     def __enter__(self) -> LifFile:
@@ -975,6 +1036,12 @@ class LifImageABC(ABC):
         """Length of one array element in bytes."""
         return self.dtype.itemsize
 
+    @property
+    def frames(self) -> LifImageFrames:
+        """Interface for accessing individual image frames."""
+        msg = 'frames property not implemented for this image type'
+        raise NotImplementedError(msg)
+
     @cached_property
     @abstractmethod
     def coords(self) -> dict[str, NDArray[Any]]:
@@ -1023,6 +1090,9 @@ class LifImageABC(ABC):
         """Memory block containing image data."""
         if self.parent.type in {LifFileType.LOF, LifFileType.XLIF}:
             # XLIF and LOF files contain one memory block
+            if not self.parent.memory_blocks:
+                msg = 'no memory blocks found in file'
+                raise IndexError(msg)
             return self.parent.memory_blocks[
                 next(iter(self.parent.memory_blocks.keys()))
             ]
@@ -1038,12 +1108,8 @@ class LifImageABC(ABC):
 
     @property
     def timestamps(self) -> NDArray[numpy.datetime64]:
-        """Return time stamps of frames from TimeStampList XML element."""
+        """Time stamps of frames from TimeStampList XML element."""
         return numpy.asarray([], dtype=numpy.datetime64)
-
-    # @abstractmethod
-    # def frames(self) -> Iterator[NDArray[Any]]:
-    #     """Return iterator over frames in image."""
 
     @abstractmethod
     def asarray(
@@ -1114,12 +1180,21 @@ class LifImageABC(ABC):
         return r
 
     def __str__(self) -> str:
+        def _get_attr_str(name: str) -> str | None:
+            try:
+                value = getattr(self, name)
+                if callable(value):
+                    return None
+                return f'{name}: {value!r}'[:160]
+            except (NotImplementedError, AttributeError):
+                return None
+
         return indent(
             repr(self),
             *(
-                f'{name}: {getattr(self, name)!r}'[:160]
+                s
                 for name in dir(self)
-                if not (name.startswith('_') or callable(getattr(self, name)))
+                if not name.startswith('_') and (s := _get_attr_str(name))
             ),
         )
 
@@ -1182,7 +1257,10 @@ class LifImage(LifImageABC):
                 msg = f'invalid {data_type=}'
                 raise ValueError(msg)
 
-            if 0 < resolution <= 8:
+            if not 0 < resolution <= 64:
+                msg = f'invalid {resolution=}'
+                raise ValueError(msg)
+            if resolution <= 8:
                 itemsize = 1
                 if dtype == 'f':
                     msg = f'invalid dtype {dtype}{itemsize}'
@@ -1191,11 +1269,9 @@ class LifImage(LifImageABC):
                 itemsize = 2
             elif resolution <= 32:
                 itemsize = 4
-            elif resolution <= 64:
-                itemsize = 8
             else:
-                msg = f'invalid {resolution=}'
-                raise ValueError(msg)
+                # resolution <= 64:
+                itemsize = 8
 
             channels.append(
                 LifChannel(
@@ -1219,13 +1295,58 @@ class LifImage(LifImageABC):
         )
 
     @cached_property
+    def _is_bgr(self) -> bool:
+        """Image has BGR channel order."""
+        return (
+            len(self.memory_block.frames) == 0  # disable for frames
+            and self.sizes.get('S', 0) == 3
+            and len(self._channels) >= 2
+            and self._channels[0].channel_tag == 3  # blue
+            and self._channels[1].channel_tag == 2  # green
+        )
+
+    @cached_property
+    def _lof_reference(self) -> LifFile | None:
+        """Cached LOF file if XLIF references single LOF, else None."""
+        memblock = self.memory_block
+        if (
+            memblock.type == LifMemoryBlockType.LOF
+            and len(memblock.frames) == 1
+        ):
+            path = os.path.join(self.parent.dirname, memblock.frames[0].file)
+            if not os.path.exists(path):
+                path = case_sensitive_path(path)
+            return LifFile(path, squeeze=self.parent._squeeze)
+        return None
+
+    @cached_property
+    def _tif_reference(self) -> TiffFile | None:
+        """Cached TiffFile if XLIF references single OME/AIVIA, else None."""
+        memblock = self.memory_block
+        if len(memblock.frames) == 1 and memblock.type in {
+            LifMemoryBlockType.OME,
+            LifMemoryBlockType.AIVIA,
+        }:
+            from tifffile import TiffFile
+
+            path = os.path.join(self.parent.dirname, memblock.frames[0].file)
+            if not os.path.exists(path):
+                path = case_sensitive_path(path)
+            return TiffFile(path)
+        return None
+
+    @cached_property
     def dtype(self) -> numpy.dtype[Any]:
         channels = self._channels
+        if not channels:
+            msg = 'no channels found in image'
+            raise ValueError(msg)
         dtype = channels[0].dtype
 
         if len(channels) > 1 and any(dtype != c.dtype for c in channels):
             msg = (
-                'heterogeneous channel data types not supported. '
+                'heterogeneous channel data types not supported '
+                'by LifImage.asarray; use the frames interface instead. '
                 'Please share the file at https://github.com/cgohlke/liffile'
             )
             raise ValueError(msg)
@@ -1291,7 +1412,6 @@ class LifImage(LifImageABC):
                 sizes_stored.get(dim, size)
                 for dim, size in reversed(sizes.items())
             )
-
         return dict(reversed(list(sizes.items())))
 
     @cached_property
@@ -1362,6 +1482,75 @@ class LifImage(LifImageABC):
             'datetime64[ms]'
         )
 
+    def frame(
+        self,
+        *,
+        out: OutputType = None,
+        **indices: int,
+    ) -> NDArray[Any]:
+        """Return single frame from image.
+
+        A frame consists of the innermost two contiguous dimensions
+        (typically Y, X) and an optional sample dimension (S for RGB).
+
+        Parameters:
+            out:
+                Specifies where to copy frame data.
+                If ``None``, create a new NumPy array in main memory.
+                If ``'memmap'``, create a memory-mapped array in a
+                temporary file.
+                If a ``numpy.ndarray``, a writable, initialized array
+                of compatible shape and dtype.
+                If a ``file name`` or ``open file``, create a
+                memory-mapped array in the specified file.
+            **indices:
+                Global dimension indices using case-sensitive dimension codes.
+                Unspecified dimensions default to index 0.
+                Example: ``C=1, Z=2, T=0`` for channel 1, Z-plane 2, time 0.
+
+        Returns:
+            :
+                Frame data as numpy array.
+
+        Raises:
+            KeyError: If unknown dimension specified.
+            IndexError: If index is out of bounds.
+
+        """
+        return self.frames._read_frame(out=out, **indices)
+
+    @cached_property
+    def frames(self) -> LifImageFrames:
+        """Interface for accessing individual image frames.
+
+        Returns a :py:class:`LifImageFrames` object that provides
+        memory-efficient, frame-level access to image data.
+
+        A frame consists of the innermost two contiguous dimensions
+        (typically Y, X) and an optional sample dimension (S for RGB).
+        This allows iteration over higher dimensional data one 2D slice
+        at a time without loading the entire image into memory.
+
+        Returns:
+            :
+                LifImageFrames instance for accessing individual frames
+                or creating frame selections.
+
+        Examples:
+            Access single frame using global indices::
+
+                frame = image.frames[0]  # first frame
+                frame = image.frame(C=1, Z=2, T=0)  # specific indices
+
+            Create selection and iterate::
+
+                selected = image.frames(C=1, Z=slice(1, 3))
+                for index, frame in selected.items():
+                    process(frame)
+
+        """
+        return LifImageFrames(self)
+
     def asarray(
         self,
         *,
@@ -1390,25 +1579,25 @@ class LifImage(LifImageABC):
             :
                 Image data as numpy array. RGB samples may not be contiguous.
 
+        Note:
+            For advanced use cases, use the :py:attr:`frames` interface,
+            which supports per-dimension selections, heterogeneous channel
+            data types, and discontiguous storage.
+
         """
         if self._shape_stored is None:
             data = self.memory_block.read_array(
                 self.shape, self.dtype, mode=mode, out=out
             )
         else:
-            # TODO: this does not work with user-provided output array
+            # shape_stored differs from shape (e.g., stride-aligned rows)
+            # out must match _shape_stored or be None
             data = self.memory_block.read_array(
                 self._shape_stored, self.dtype, mode=mode, out=out
             )
             data = data[tuple(slice(size) for size in self.shape)]
-        if (
-            len(self.memory_block.frames) == 0  # disable for frames
-            and self.sizes.get('S', 0) == 3
-            and self._channels[0].channel_tag == 3  # blue
-            and self._channels[1].channel_tag == 2  # green
-        ):
-            # BGR to RGB
-            data = data[..., ::-1]
+        if self._is_bgr:
+            data[:] = data[..., ::-1]  # BGR to RGB
         return data
 
 
@@ -1502,6 +1691,8 @@ class LifFlimImage(LifImageABC):
         attrs = self.attrs['RawData']
         frequency = float(attrs['LaserPulseFrequency'])
         clock_period = float(attrs['ClockPeriod'])
+        if frequency == 0.0 or clock_period == 0.0:
+            return 1
         return max(1, math.floor(1.0 / frequency / clock_period))
 
     @property
@@ -1569,6 +1760,849 @@ class LifFlimImage(LifImageABC):
         fmt = self.attrs['RawData']['Format']
         msg = f'format={fmt!r} is patent-pending'
         raise NotImplementedError(msg)
+
+
+@final
+class LifImageFrames:
+    """Frame-based access interface for LifImage.
+
+    A mapping and sequence-like interface providing frame-level access
+    to image data.
+    Usually obtained via the :py:attr:`LifImage.frames` property.
+
+    A frame consists of the innermost two contiguous dimensions
+    (typically Y and X) and an optional sample dimension (S for RGB).
+    This allows memory-efficient iteration over higher-dimensional
+    data one 2D slice at a time.
+
+    Parameters:
+        image:
+            Parent LifImage instance.
+        **selection:
+            Per-dimension selection using case-sensitive codes.
+
+            - ``int``: Fixed index (dimension not iterated).
+            - ``slice``: Range of indices to iterate.
+            - ``Sequence[int]``: Specific indices to iterate.
+            - ``None``: Iterate all indices.
+
+    Raises:
+        KeyError: If unknown dimension specified.
+        ValueError: If frame dimension (for example, Y, X, S) specified.
+
+    """
+
+    _image: LifImage
+    _selection: SelectionType
+
+    def __init__(
+        self,
+        image: LifImage,
+        /,
+        **selection: SelectionValue,
+    ) -> None:
+        self._image = image
+        self._selection = selection
+
+        if not selection:
+            return
+
+        for key in selection:
+            if key not in image.sizes:
+                msg = f'unknown dimension {key!r}'
+                raise KeyError(msg)
+
+    def __call__(
+        self,
+        **selection: SelectionValue,
+    ) -> LifImageFrames:
+        """Create new instance with selection.
+
+        Parameters:
+            **selection:
+                Per-dimension selection using case-sensitive codes.
+
+                - ``int``: Fixed index (dimension not iterated).
+                - ``slice``: Range of indices to iterate.
+                - ``Sequence[int]``: Specific indices to iterate.
+                - ``None``: Iterate all indices.
+
+        Returns:
+            New LifImageFrames instance.
+
+        Raises:
+            ValueError: If called on instance with existing selection.
+
+        """
+        if not selection:
+            return self
+
+        if self._selection:
+            msg = 'cannot chain selections; call on image.frames instead'
+            raise ValueError(msg)
+
+        return LifImageFrames(self._image, **selection)
+
+    @cached_property
+    def _info(self) -> LifImageFramesInfo:
+        """Private cached information used repeatedly."""
+        image = self._image
+        frame_dims = set(self.frame_sizes.keys())
+
+        # validate selection keys now that frame_sizes is computed
+        for key in self._selection:
+            if key in frame_dims:
+                msg = (
+                    f'cannot select frame dimension {key!r}; '
+                    f'frame dimensions {tuple(frame_dims)} are fixed'
+                )
+                raise ValueError(msg)
+
+        iter_dims: list[str] = []
+        iter_sizes: list[int] = []
+        iter_ranges: list[Sequence[int]] = []
+
+        # add unspecified non-frame dimensions in natural order
+        for dim in image.dims:
+            if dim in self._selection or dim in frame_dims:
+                continue
+            size = image.sizes[dim]
+            iter_dims.append(dim)
+            iter_sizes.append(size)
+            iter_ranges.append(range(size))
+
+        # add specified non-frame dimensions in order of specification
+        for dim, sel in self._selection.items():
+            # No need to check frame_dims - already validated above
+
+            size = image.sizes[dim]
+            match sel:
+                case None:
+                    # iterate all
+                    iter_sizes.append(size)
+                    iter_ranges.append(range(size))
+                case int() | numpy.integer():
+                    # fixed index
+                    if not 0 <= sel < size:
+                        msg = (
+                            f'index {sel} out of bounds '
+                            f'for dimension {dim!r} with size {size}'
+                        )
+                        raise IndexError(msg)
+                    iter_sizes.append(1)
+                    iter_ranges.append((int(sel),))
+                case slice():
+                    r = range(*sel.indices(size))
+                    iter_sizes.append(len(r))
+                    iter_ranges.append(r)
+                case _:
+                    # sequence of indices
+                    for idx in sel:
+                        if not 0 <= idx < size:
+                            msg = (
+                                f'index {idx} out of bounds '
+                                f'for dimension {dim!r} with size {size}'
+                            )
+                            raise IndexError(msg)
+                    iter_sizes.append(len(sel))
+                    iter_ranges.append(sel)
+
+            iter_dims.append(dim)
+
+        full_dims: tuple[str, ...] | None = None
+        full_ranges: tuple[Sequence[int], ...] | None = None
+
+        # squeeze out length-1 dimensions if enabled
+        if image.parent._squeeze:
+            squeezed = [
+                (d, s, r)
+                for d, s, r in zip(
+                    iter_dims, iter_sizes, iter_ranges, strict=True
+                )
+                if s > 1
+            ]
+            if len(squeezed) < len(iter_dims):
+                # store full dimensions for unsqueezing in __getitem__
+                full_dims = tuple(iter_dims)
+                full_ranges = tuple(iter_ranges)
+                if squeezed:
+                    dims_tuple, sizes_tuple, ranges_tuple = zip(
+                        *squeezed, strict=True
+                    )
+                    iter_dims = list(dims_tuple)
+                    iter_sizes = list(sizes_tuple)
+                    iter_ranges = list(ranges_tuple)
+                else:
+                    # all dimensions squeezed out
+                    iter_dims, iter_sizes, iter_ranges = [], [], []
+
+        sizes = dict(zip(iter_dims, iter_sizes, strict=True))
+        sizes.update(self.frame_sizes)
+
+        return LifImageFramesInfo(
+            length=product(iter_sizes),
+            dims=tuple(iter_dims),
+            shape=tuple(iter_sizes),
+            sizes=sizes,
+            ranges=tuple(iter_ranges),
+            full_dims=full_dims,
+            full_ranges=full_ranges,
+        )
+
+    def _read_frame(
+        self,
+        *,
+        out: OutputType = None,
+        **indices: int,
+    ) -> NDArray[Any]:
+        """Read single frame using global dimension indices.
+
+        This is a private method that reads frame data from the image
+        using absolute/global dimension indices.
+
+        Parameters:
+            out:
+                Output array or 'memmap'.
+            **indices:
+                Global dimension indices (unspecified default to 0).
+
+        Returns:
+            Frame data as numpy array.
+
+        """
+        image = self._image
+        memblock = image.memory_block
+
+        # if XLIF references single LOF, delegate to LOF's frame
+        lof_ref = image._lof_reference
+        if lof_ref is not None:
+            return lof_ref.images[0].frames._read_frame(out=out, **indices)
+
+        tif_ref = image._tif_reference
+        if tif_ref is not None:
+            # calculate global linear frame index
+            frame_dims = set(self.frame_sizes.keys())
+            iter_dims = [d for d in image.dims if d not in frame_dims]
+            if iter_dims:
+                nd_index = tuple(indices.get(d, 0) for d in iter_dims)
+                shape = tuple(image.sizes[d] for d in iter_dims)
+                linear_index = int(numpy.ravel_multi_index(nd_index, shape))
+            else:
+                linear_index = 0
+            data = tif_ref.pages[linear_index].asarray(out=out)
+            if self.dtype == numpy.float16:
+                # float16 data are stored as uint16 in TIFF
+                data = data.view(numpy.float16)
+            return data
+
+        # validate indices
+        for key, value in indices.items():
+            if key not in image.sizes:
+                msg = f'unknown dimension {key!r}'
+                raise KeyError(msg)
+            if not 0 <= value < image.sizes[key]:
+                msg = (
+                    f'index {value} out of bounds '
+                    f'for dimension {key!r} with size {image.sizes[key]}'
+                )
+                raise IndexError(msg)
+
+        # calculate byte offset from dimension indices
+        offset = 0
+        frame_dims = set(self.frame_sizes.keys())
+        for dim in image._dimensions:
+            if dim.label in frame_dims:
+                continue
+            idx = indices.get(dim.label, 0)
+            offset += idx * dim.bytes_inc
+
+        # determine channel and its dtype
+        channel_idx = indices.get('C', 0)
+        if image._channels:
+            # when S is in frame_dims, channels are grouped by C
+            # with S samples per C, so index is C * S
+            if 'S' in frame_dims:
+                channel_idx *= image.sizes.get('S', 1)
+            channel = image._channels[channel_idx]
+            offset += channel.bytes_inc
+            dtype = channel.dtype
+        else:
+            dtype = image.dtype
+
+        # calculate frame size in bytes
+        frame_shape = self.frame_shape
+        frame_nbytes = product(frame_shape) * dtype.itemsize
+
+        # read frame from memory block frames (XLIF with external files)
+        if memblock.frames:
+            # find frame containing the calculated offset
+            for frame in memblock.frames:
+                frame_start = frame.offset
+                frame_end = frame.offset + frame.size
+                if frame_start <= offset < frame_end:
+                    # check if entire requested data fits within this frame
+                    if offset + frame_nbytes <= frame_end:
+                        # WARNING: this may read more data than needed
+                        # if external file contains multiple frames.
+                        # However, LOF and multi-page TIFF files are
+                        # special-cased above.
+                        data = frame.imread(image.parent.dirname)
+                        data = data.reshape(-1).view(numpy.uint8)
+                        local_offset = offset - frame_start
+                        data = data[local_offset : local_offset + frame_nbytes]
+                        data = data.view(dtype).reshape(frame_shape)
+                        if out is None:
+                            return data.copy()
+                        result = create_output(out, frame_shape, dtype)
+                        result[:] = data
+                        return result
+                    # requested data spans multiple external files
+                    break
+            # offset not found or data spans multiple files
+            msg = 'frame not supported for this XLIF layout'
+            raise NotImplementedError(msg)
+
+        # read frame directly from LIF/LOF file
+        if memblock.offset < 0:
+            msg = 'memory block has no offset and no frames'
+            raise ValueError(msg)
+
+        fh = image.parent.filehandle
+        fh.seek(memblock.offset + offset)
+        buffer = fh.read(frame_nbytes)
+        if len(buffer) != frame_nbytes:
+            msg = f'read {len(buffer)} bytes, expected {frame_nbytes}'
+            raise OSError(msg)
+
+        result = create_output(out, frame_shape, dtype)
+        result[:] = numpy.frombuffer(buffer, dtype=dtype).reshape(frame_shape)
+        if image._is_bgr:
+            result[:] = result[..., ::-1]  # BGR to RGB
+        return result
+
+    @cached_property
+    def frame_sizes(self) -> dict[str, int]:
+        """Dimension sizes of single frame."""
+        # For most files, a simple approach would work::
+        #
+        #     dims = list(image.sizes.keys())
+        #     frame_dims = dims[-3:] if dims[-1] == 'S' else dims[-2:]
+        #
+        # However, this elaborate logic ensures correctness for:
+        #
+        # * XLIF files referencing external data
+        # * Stride-aligned images
+        # * Files with unusual memory layouts
+        #
+        # The function can in principle return:
+        #
+        # * 3 dimensions: {Y, X, S} (typical RGB)
+        # * 2 dimensions: {Y, X} (typical grayscale), {T, X}, {Z, X}, or {X, S}
+        #   (stride-aligned with Y excluded)
+        # * 1 dimension: {X} (severe layout issues)
+        # * 0 dimensions: {} (no contiguous data or extreme constraints)
+
+        image = self._image
+        # only consider dimensions present in sizes (not squeezed)
+        dims_in_sizes = [
+            dim for dim in image._dimensions if dim.label in image.sizes
+        ]
+        if not dims_in_sizes:
+            return {}
+
+        # if XLIF references single LOF, delegate to LOF's frame structure
+        if image._lof_reference is not None:
+            return image._lof_reference.images[0].frames.frame_sizes
+
+        memblock = image.memory_block
+
+        # sort by bytes_inc ascending to get inner-to-outer order
+        dims_ascending = sorted(dims_in_sizes, key=lambda d: d.bytes_inc)
+
+        frame_labels: list[str] = []
+        expected_stride = image.dtype.itemsize
+
+        for dim in dims_ascending:
+            if dim.bytes_inc == expected_stride:
+                # contiguous with previous, include in frame
+                frame_labels.append(dim.label)
+                expected_stride = dim.bytes_inc * dim.number_elements
+            elif (
+                dim.bytes_inc > expected_stride
+                and dim.bytes_inc % expected_stride == 0
+            ):
+                # gap may be filled by sample dimension (RGB)
+                gap_size = dim.bytes_inc // expected_stride
+                if (
+                    'S' in image.sizes
+                    and image.sizes['S'] == gap_size
+                    and 'S' not in frame_labels
+                ):
+                    frame_labels.append('S')
+                    expected_stride = dim.bytes_inc
+                    frame_labels.append(dim.label)
+                    expected_stride = dim.bytes_inc * dim.number_elements
+                else:
+                    # true discontinuity, frame ends
+                    break
+            elif (
+                dim.label == 'Y'
+                and 'X' in frame_labels
+                and 'S' in frame_labels
+                and dim.bytes_inc % (image.sizes['S'] * image.dtype.itemsize)
+                == 0
+            ):
+                # account for stride-aligned RGB rows (padding at end of rows)
+                frame_labels.append(dim.label)
+                expected_stride = dim.bytes_inc * dim.number_elements
+            else:
+                # discontinuity
+                break
+
+        # limit frame to 2 spatial dimensions plus optional S
+        # count non-S dimensions
+        spatial_count = sum(1 for d in frame_labels if d != 'S')
+        if spatial_count > 2:
+            # keep only innermost 2 spatial dimensions (+ S if present)
+            # frame_labels is ordered inner-to-outer, so keep first entries
+            kept: list[str] = []
+            spatial_kept = 0
+            for label in frame_labels:
+                if label == 'S':
+                    kept.append(label)
+                elif spatial_kept < 2:
+                    kept.append(label)
+                    spatial_kept += 1
+                else:
+                    break
+            frame_labels = kept
+
+        # check if external frames constrain the frame size
+        if memblock.frames:
+            # find smallest external frame size
+            min_frame_size = min(frame.size for frame in memblock.frames)
+            # remove outer dimensions until frame fits in external frame
+            # frame_labels is inner-to-outer, so remove from end
+            while frame_labels:
+                frame_nbytes = (
+                    product(image.sizes[d] for d in frame_labels)
+                    * image.dtype.itemsize
+                )
+                if frame_nbytes <= min_frame_size:
+                    break
+                frame_labels.pop()
+
+        frame_set = set(frame_labels)
+        # return in same order as image.sizes
+        return {
+            dim: size for dim, size in image.sizes.items() if dim in frame_set
+        }
+
+    @property
+    def frame_shape(self) -> tuple[int, ...]:
+        """Shape of single frame."""
+        return tuple(self.frame_sizes.values())
+
+    @property
+    def frame_dims(self) -> tuple[str, ...]:
+        """Dimension names of single frame."""
+        return tuple(self.frame_sizes.keys())
+
+    @property
+    def sizes(self) -> dict[str, int]:
+        """Map dimension names to lengths.
+
+        Including selected and frame dimensions.
+
+        """
+        return self._info.sizes
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape including selected and frame dimensions."""
+        return tuple(self._info.sizes.values())
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        """Dimension names including selected and frame dimensions."""
+        return tuple(self._info.sizes.keys())
+
+    @property
+    def ndim(self) -> int:
+        """Number of dimensions including selected and frame dimensions."""
+        return len(self._info.sizes)
+
+    @cached_property
+    def dtype(self) -> numpy.dtype[Any]:
+        """Data type resulting from NumPy type promotion rules."""
+        channels = self._image._channels
+        if not channels:
+            msg = 'no channels found in image'
+            raise ValueError(msg)
+        return numpy.result_type(*(c.dtype for c in channels))
+
+    @property
+    def coords(self) -> dict[str, NDArray[Any]]:
+        """Physical coordinates for selected and frame dimensions."""
+        image_coords = self._image.coords
+
+        result = {}
+        for dim in self._info.dims:
+            if dim in image_coords:
+                coord_array = image_coords[dim]
+                # get indices for this dimension in selection
+                if dim in self._selection:
+                    sel = self._selection[dim]
+                    match sel:
+                        case None:
+                            result[dim] = coord_array
+                        case int() | numpy.integer():
+                            result[dim] = coord_array[sel : sel + 1]
+                        case slice():
+                            result[dim] = coord_array[sel]
+                        case _:
+                            result[dim] = coord_array[list(sel)]
+                else:
+                    result[dim] = coord_array
+
+        # add frame dimension coordinates
+        for dim in self.frame_sizes:
+            if dim in image_coords:
+                result[dim] = image_coords[dim]
+
+        return result
+
+    def keys(self) -> Iterator[tuple[int, ...]]:
+        """Return iterator over ND indices (tuples).
+
+        Yields:
+            ND index tuples for each frame in the selection.
+
+        """
+        yield from itertools.product(
+            *(range(size) for size in self._info.shape)
+        )
+
+    def values(self) -> Iterator[NDArray[Any]]:
+        """Return iterator over frames.
+
+        Equivalent to iterating over the sequence directly.
+
+        Yields:
+            Frame data as numpy arrays.
+
+        """
+        return iter(self)
+
+    def items(self) -> Iterator[tuple[tuple[int, ...], NDArray[Any]]]:
+        """Return iterator over (ND index, frame) pairs.
+
+        Yields:
+            Tuples of (index, frame) where index is an ND tuple and
+            frame is the corresponding numpy array.
+
+        """
+        for key in self.keys():
+            yield key, self[key]
+
+    def get(
+        self,
+        key: int | tuple[int, ...],
+        default: NDArray[Any] | None = None,
+    ) -> NDArray[Any] | None:
+        """Return frame by local index, with default.
+
+        Parameters:
+            key:
+                Linear index (int) or ND index (tuple).
+            default:
+                Value to return if key not found.
+
+        Returns:
+            Frame data or default.
+
+        """
+        try:
+            return self[key]
+        except (IndexError, KeyError, TypeError):
+            return default
+
+    def asarray(self, *, out: OutputType = None) -> NDArray[Any]:
+        """Return selected frames as single array.
+
+        Parameters:
+            out:
+                Output array or 'memmap'.
+
+        Returns:
+            Array with :py:attr:`shape` and :py:attr:`dtype`.
+
+        """
+        if not self.shape:
+            return numpy.array([], self.dtype)
+        result = create_output(out, self.shape, self.dtype)
+        for index, frame in self.items():
+            result[index] = frame
+        return result
+
+    def asxarray(self, **kwargs: Any) -> DataArray:
+        """Return selected frames as xarray.
+
+        Parameters:
+            **kwargs: Optional arguments to :py:meth:`asarray`.
+
+        Returns:
+            :
+                Image data and metadata of selected frames as xarray DataArray.
+
+        """
+        from xarray import DataArray
+
+        return DataArray(
+            self.asarray(**kwargs),
+            coords=self.coords,
+            dims=self.dims,
+            name=self._image.name,
+            attrs=self._image.attrs,
+        )
+
+    def unravel_index(
+        self,
+        linear_index: int,
+        /,
+        *,
+        global_: bool = False,
+    ) -> tuple[int, ...]:
+        """Convert linear index to ND index.
+
+        Parameters:
+            linear_index:
+                Linear index (0 to len-1).
+            global_:
+                If True, return global (absolute) indices.
+                If False, return local (selection-relative) indices.
+
+        Returns:
+            ND index as tuple, excluding frame dimensions.
+
+        Raises:
+            IndexError: If linear_index is out of bounds.
+
+        """
+        info = self._info
+
+        if not 0 <= linear_index < info.length:
+            msg = (
+                f'linear index {linear_index} out of bounds '
+                f'for length {info.length}'
+            )
+            raise IndexError(msg)
+
+        # convert to local ND index
+        local_nd = []
+        remaining = linear_index
+        for size in reversed(info.shape):
+            local_nd.append(remaining % size)
+            remaining //= size
+        local_nd.reverse()
+
+        if not global_:
+            return tuple(local_nd)
+
+        # convert to global ND index
+        global_nd = []
+        for local_idx, range_seq in zip(local_nd, info.ranges, strict=True):
+            if isinstance(range_seq, range):
+                global_nd.append(range_seq[local_idx])
+            else:
+                global_nd.append(int(range_seq[local_idx]))
+
+        return tuple(global_nd)
+
+    def ravel_multi_index(
+        self,
+        nd_index: tuple[int, ...],
+        /,
+        *,
+        global_: bool = False,
+    ) -> int:
+        """Convert ND index to linear index.
+
+        Parameters:
+            nd_index:
+                ND index as tuple, excluding frame dimensions.
+            global_:
+                If True, nd_index contains global (absolute) indices.
+                If False, nd_index contains local (selection-relative) indices.
+
+        Returns:
+            Linear index.
+
+        Raises:
+            ValueError: If nd_index has wrong length.
+            IndexError: If any index is out of bounds.
+
+        """
+        info = self._info
+
+        if len(nd_index) != len(info.dims):
+            msg = (
+                f'nd_index length {len(nd_index)} does not match '
+                f'number of iteration dimensions {len(info.dims)}'
+            )
+            raise ValueError(msg)
+
+        local_nd = nd_index
+        if global_:
+            # convert global to local
+            local_nd_list = []
+            for global_idx, range_seq in zip(
+                nd_index, info.ranges, strict=True
+            ):
+                if isinstance(range_seq, range):
+                    try:
+                        local_idx = range_seq.index(global_idx)
+                    except ValueError:
+                        msg = (
+                            f'global index {global_idx} '
+                            f'not in range {range_seq}'
+                        )
+                        raise IndexError(msg) from None
+                else:
+                    try:
+                        local_idx = next(
+                            i
+                            for i, val in enumerate(range_seq)
+                            if val == global_idx
+                        )
+                    except StopIteration:
+                        msg = (
+                            f'global index {global_idx} '
+                            f'not in sequence {range_seq}'
+                        )
+                        raise IndexError(msg) from None
+                local_nd_list.append(local_idx)
+            local_nd = tuple(local_nd_list)
+
+        # validate bounds
+        for idx, size in zip(local_nd, info.shape, strict=True):
+            if not 0 <= idx < size:
+                msg = f'index {idx} out of bounds for size {size}'
+                raise IndexError(msg)
+
+        # convert to linear
+        linear = 0
+        for idx, size in zip(local_nd, info.shape, strict=True):
+            linear = linear * size + idx
+
+        return linear
+
+    def __getitem__(self, key: int | tuple[int, ...], /) -> NDArray[Any]:
+        """Get frame by local index.
+
+        Parameters:
+            key:
+                Linear index (int) or ND index (tuple of int).
+
+        Returns:
+            Frame data as numpy array.
+
+        Raises:
+            IndexError: If key is out of bounds.
+            TypeError: If key has wrong type.
+
+        """
+        info = self._info
+
+        if isinstance(key, (int, numpy.integer)):
+            # convert linear to ND local
+            nd_local = self.unravel_index(int(key), global_=False)
+        elif isinstance(key, tuple):
+            nd_local = tuple(int(i) for i in key)
+            if len(nd_local) != len(info.dims):
+                msg = (
+                    f'ND index length {len(nd_local)} does not match '
+                    f'number of iteration dimensions {len(info.dims)}'
+                )
+                raise IndexError(msg)
+        else:
+            msg = f'indices must be int or tuple, not {type(key).__name__}'
+            raise TypeError(msg)
+
+        # convert local ND to global ND directly
+        nd_global = []
+        for local_idx, range_seq in zip(nd_local, info.ranges, strict=True):
+            if isinstance(range_seq, range):
+                nd_global.append(range_seq[local_idx])
+            else:
+                nd_global.append(int(range_seq[local_idx]))
+
+        # build global indices dict
+        global_indices = dict(zip(info.dims, nd_global, strict=True))
+
+        # unsqueeze if necessary (restore length-1 dimensions)
+        if info.full_dims is not None:
+            assert info.full_ranges is not None
+            full_global_indices = {}
+            for dim, range_seq in zip(
+                info.full_dims, info.full_ranges, strict=True
+            ):
+                if dim in global_indices:
+                    full_global_indices[dim] = global_indices[dim]
+                else:
+                    # this was a squeezed dimension, use its single value
+                    full_global_indices[dim] = next(iter(range_seq))
+            global_indices = full_global_indices
+
+        return self._read_frame(out=None, **global_indices)
+
+    def __len__(self) -> int:
+        """Number of frames in selection."""
+        return self._info.length
+
+    def __iter__(self) -> Iterator[NDArray[Any]]:
+        """Iterate over selected frames."""
+        yield from (self[key] for key in self.keys())
+
+    def __repr__(self) -> str:
+        info = self._info
+        frame_shape = self.frame_shape
+        if info.dims:
+            iter_pairs = ', '.join(
+                f'{d}: {s}' for d, s in zip(info.dims, info.shape, strict=True)
+            )
+            iter_str = f'({iter_pairs})'
+            return (
+                f'<LifImageFrames {self._image.name!r} '
+                f'{iter_str} x {frame_shape}>'
+            )
+        return f'<LifImageFrames {self._image.name!r} {frame_shape}>'
+
+
+@dataclass(frozen=True, slots=True)
+class LifImageFramesInfo:
+    """Internal information for LifImageFrames."""
+
+    length: int
+    """Number of frames."""
+
+    dims: tuple[str, ...]
+    """Post-squeeze dimension names excluding frame."""
+
+    shape: tuple[int, ...]
+    """Post-squeeze dimension sizes excluding frame."""
+
+    sizes: dict[str, int]
+    """Dimension names and sizes including frame."""
+
+    ranges: tuple[Sequence[int], ...]
+    """Post-squeeze ranges for each dimension excluding frame."""
+
+    full_dims: tuple[str, ...] | None = None
+    """Pre-squeeze dimension names, if squeezing removed dimensions."""
+
+    full_ranges: tuple[Sequence[int], ...] | None = None
+    """Pre-squeeze ranges, if squeezing removed dimensions."""
 
 
 @final
@@ -1646,7 +2680,7 @@ class LifImageSeries(Sequence[LifImageABC]):
         flags: int = re.IGNORECASE,
         default: Any = None,
     ) -> LifImageABC | None:
-        """Return first image with matching path pattern, if any.
+        """Return first image with matching attribute pattern, if any.
 
         Parameters:
             key:
@@ -1656,7 +2690,7 @@ class LifImageSeries(Sequence[LifImageABC]):
             flags:
                 Regular expression flags.
             default:
-                Value to return if no image with matching path found.
+                Value to return if no image with matching attribute found.
 
         """
         pattern = re.compile(key, flags=flags)
@@ -1674,7 +2708,7 @@ class LifImageSeries(Sequence[LifImageABC]):
         attr: str = 'path',
         flags: int = re.IGNORECASE,
     ) -> tuple[LifImageABC, ...]:
-        """Return all images with matching path pattern.
+        """Return all images with matching attribute pattern.
 
         Parameters:
             key:
@@ -1698,19 +2732,20 @@ class LifImageSeries(Sequence[LifImageABC]):
         key: int | str,
         /,
     ) -> LifImageABC:
-        """Return image at index or first image with matching path.
+        """Return image at index or first image with path matching pattern.
 
         Raises:
             IndexError: if integer index out of range.
-            KeyError: if no image with matching path found.
+            KeyError: if no image with matching path pattern found.
 
         """
         if isinstance(key, int):
+            index = key
             try:
-                key = tuple(self._images.keys())[key]
-            except IndexError as exc:
-                msg = f'image index={key} out of range'
-                raise IndexError(msg) from exc
+                key = tuple(self._images.keys())[index]
+            except IndexError:
+                msg = f'image {index=} out of range'
+                raise IndexError(msg) from None
             return self._images[key]
         if key in self._images:
             return self._images[key]
@@ -1740,6 +2775,37 @@ class LifImageSeries(Sequence[LifImageABC]):
         )
 
 
+class LifMemoryBlockType(enum.IntEnum):
+    """Leica image file memory block type."""
+
+    UNKNOWN = -1
+    """Unknown memory block type."""
+
+    MEM = 0
+    """Memory block embedded in LIF."""
+
+    LOF = 1
+    """Memory block in single LOF file."""
+
+    TIF = 2
+    """Memory blocks in TIF files."""
+
+    OME = 3
+    """Memory blocks in OME TIF files."""
+
+    AIVIA = 4
+    """Memory blocks in Aivia TIF files."""
+
+    JPG = 5
+    """Memory blocks in JPG files."""
+
+    PNG = 6
+    """Memory blocks in PNG files."""
+
+    BMP = 7
+    """Memory blocks in BMP files."""
+
+
 @final
 class LifMemoryBlock:
     """Object memory block.
@@ -1749,10 +2815,13 @@ class LifMemoryBlock:
 
     """
 
-    __slots__ = ('parent', 'id', 'offset', 'size', 'frames')
+    __slots__ = ('parent', 'type', 'id', 'offset', 'size', 'frames')
 
     parent: LifFile
     """Underlying LIF file."""
+
+    type: LifMemoryBlockType
+    """Memory block type."""
 
     id: str
     """Identity of memory block."""
@@ -1768,6 +2837,7 @@ class LifMemoryBlock:
 
     def __init__(self, parent: LifFile, /) -> None:
         self.parent = parent
+        self.type = LifMemoryBlockType.MEM
         self.id = ''
         self.offset = -1
         self.size = 0
@@ -1795,6 +2865,23 @@ class LifMemoryBlock:
                 uuid = block.get('UUID', '')
                 frames.append(LifMemoryFrame(file, offset, size, uuid))
             self.frames = tuple(frames)
+            self.type = LifMemoryBlockType.UNKNOWN
+            if frames:
+                file = self.frames[0].file.lower()
+                if file.endswith('.lof'):
+                    self.type = LifMemoryBlockType.LOF
+                elif file.endswith('.ome.tif'):
+                    self.type = LifMemoryBlockType.OME
+                elif file.endswith('.aivia.tif'):
+                    self.type = LifMemoryBlockType.AIVIA
+                elif file.endswith('.tif'):
+                    self.type = LifMemoryBlockType.TIF
+                elif file.endswith('.jpg'):
+                    self.type = LifMemoryBlockType.JPG
+                elif file.endswith('.png'):
+                    self.type = LifMemoryBlockType.PNG
+                elif file.endswith('.bmp'):
+                    self.type = LifMemoryBlockType.BMP
             return
 
         if parent.type == LifFileType.LOF:
@@ -1972,8 +3059,9 @@ class LifMemoryBlock:
 
     def __repr__(self) -> str:
         frames = f' frames={len(self.frames)}' if len(self.frames) > 0 else ''
+        id_or_type = f'{self.id!r}' if self.id else self.type.name.lower()
         return (
-            f'<{self.__class__.__name__} {self.id!r} '
+            f'<{self.__class__.__name__} {id_or_type} '
             f'offset={self.offset} size={self.size}{frames}>'
         )
 
@@ -2039,7 +3127,7 @@ class LifMemoryFrame:
                 # RGB -> grayscale
                 im = im[:, :, 0]
             else:
-                msg = f'{self.size!r} != array size={im.nbytes}'
+                msg = f'frame size={self.size!r} != array size={im.nbytes}'
                 raise ValueError(msg)
         return im
 
@@ -2063,7 +3151,7 @@ class LifChannel:
     channel_tag: int
     """Gray (0), Red (1), Green (2), or Blue (3)."""
 
-    resolution: float
+    resolution: int
     """Bits per pixel."""
 
     name_of_measured_quantity: str
@@ -2318,7 +3406,8 @@ def create_output(
         if not numpy.can_cast(dtype, out.dtype):
             msg = f'cannot cast {dtype} to {out.dtype}'
             raise ValueError(msg)
-        out = out.reshape(shape)
+        if out.shape != shape:
+            out = out.reshape(shape)
         if fillvalue is not None:
             out.fill(fillvalue)
         return out
@@ -2381,10 +3470,10 @@ def case_sensitive_path(path: str, /) -> str:
             for entry in it:
                 if entry.name.lower() == basename:
                     return os.path.join(dirname, entry.name)
-        msg = f'{str(path)!r} not found'
+        msg = f'file {str(path)!r} not found'
         raise FileNotFoundError(msg)
     except (OSError, PermissionError) as exc:
-        msg = f'{str(path)!r} not accessible'
+        msg = f'file {str(path)!r} not accessible'
         raise FileNotFoundError(msg) from exc
 
 
@@ -2410,7 +3499,7 @@ def xml2dict(
         dict: Dictionary representation of XML element.
 
     """
-    at, tx = prefix if prefix else ('', '')
+    at, tx = prefix or ('', '')
     exclude = set() if exclude is None else exclude
 
     def astype(value: Any, /) -> Any:
@@ -2563,11 +3652,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         files = argv[1:]
 
-    for fname in files:
-        if fltr and os.path.splitext(fname)[-1].lower() not in FILE_EXTENSIONS:
+    for filename in files:
+        if (
+            fltr
+            and os.path.splitext(filename)[-1].lower() not in FILE_EXTENSIONS
+        ):
             continue
         try:
-            with LifFile(fname) as lif:
+            with LifFile(filename) as lif:
                 print(lif)
                 print()
                 if imshow is None:
@@ -2596,11 +3688,11 @@ def main(argv: list[str] | None = None) -> int:
                             interpolation='None',
                         )
                     except Exception as exc:
-                        print(fname, exc)
+                        print(filename, exc)
         except Exception:
             import traceback
 
-            print('Failed to read', fname)
+            print('Failed to read', filename)
             traceback.print_exc()
             print()
             continue
