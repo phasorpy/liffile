@@ -1,6 +1,11 @@
 Revisions
 ---------
 
+2026.2.15
+
+- Add experimental frame-based interface to LifImage.
+- Fix code review issues.
+
 2026.1.22
 
 - Fix reading sequence of LifMemoryBlocks.
