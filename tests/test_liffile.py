@@ -29,7 +29,7 @@
 
 """Unittests for the liffile package.
 
-:Version: 2026.2.15
+:Version: 2026.2.16
 
 """
 
@@ -1311,6 +1311,7 @@ def test_lif(filetype, scanmodes_file):
         assert_allclose(im.coords['Y'][[0, -1]], [-3.418137e-05, 3.658182e-04])
         assert_allclose(im.coords['X'][[0, -1]], [8.673617e-20, 3.999996e-04])
         assert im.attrs['path'] == im.parent.name + '/' + im.path
+        assert im.timestamps is not None
         assert len(im.timestamps) == 70
         assert im.timestamps[0] == numpy.datetime64('2013-12-02T09:49:26.347')
         assert im.size == 1146880
@@ -1422,12 +1423,22 @@ def test_lof():
         assert_allclose(im.coords['Y'][[0, -1]], [0.0, 0.00122755], atol=1e-4)
         assert_allclose(im.coords['X'][[0, -1]], [0.0, 0.00163707], atol=1e-4)
         assert im.attrs['path'] == im.path
+        assert im.timestamps is not None
         assert len(im.timestamps) == 24
         assert im.timestamps[0] == numpy.datetime64('2021-12-10T11:53:16.792')
         assert im.size == 46080000
         assert im.nbytes == 46080000
         assert im.ndim == 5
         assert isinstance(im.xml_element, ElementTree.Element)
+
+        assert im.tilescan is not None
+        assert not im.tilescan.flip_x
+        assert not im.tilescan.flip_y
+        assert not im.tilescan.swap_xy
+        assert len(im.tilescan) == len(im.coords['M'])
+        for m in im.coords['M']:
+            assert im.tilescan[m][-1] == im.tilescan.tiles[m]['pos_x']
+            assert im.tilescan['pos_y'][m] == im.tilescan.tiles['pos_y'][m]
 
         attrs = im.attrs['HardwareSetting']
         assert attrs['Software'] == 'LAS X [ BETA ] 5.0.3.24880'
@@ -1535,6 +1546,7 @@ def test_xlif(name, block_type):
             im.coords['X'][[0, -1]], [8.673617e-20, 1.162500e-03], atol=1e-4
         )
         assert im.attrs['path'] == im.path
+        assert im.timestamps is not None
         assert len(im.timestamps) == 20
         assert im.timestamps[0] == numpy.datetime64('2015-01-27T10:14:30.304')
         assert im.size == 5242880
@@ -1674,7 +1686,7 @@ def test_xlef(name):
         assert im.itemsize == 1
         assert im.sizes == {'Y': 1119, 'X': 1477, 'S': 3}
         assert im.attrs['path'] == im.path
-        assert len(im.timestamps) == 0
+        assert im.timestamps is None
         assert im.size == 4958289
         assert im.nbytes == 4958289
         assert im.ndim == 3
@@ -1691,6 +1703,87 @@ def test_xlef(name):
         if im.memory_block.type == LifMemoryBlockType.LOF:
             assert im._lof_reference is not None
             assert not im._lof_reference.filehandle.closed
+
+        _assert_frames(im, data)
+
+        xdata = im.asxarray()
+        assert isinstance(xdata, xarray.DataArray)
+        assert_array_equal(xdata.data, data)
+
+
+def test_xlef_tmczyx():
+    """Test XLEF file with TMCZYX dimensions."""
+    filename = DATA / 'XYZCST/XYZCST.xlef'  # M dimension is S in LASX
+
+    with LifFile(filename, mode='r', squeeze=True) as xlef:
+        assert xlef.type == LifFileType.XLEF
+        assert xlef.parent is None
+        str(xlef)
+        assert xlef.filehandle.closed
+        assert xlef.filename == str(filename.name)
+        assert xlef.dirname == str(filename.parent)
+        assert xlef.name == os.path.basename(filename)
+        assert xlef.version == 2
+        assert isinstance(xlef.xml_element, ElementTree.Element)
+
+        assert xlef.xml_header().startswith('<?xml version="1.0"')
+        assert xlef.filehandle.closed
+
+        assert len(xlef.children) == 2
+
+        series = xlef.images
+        str(series)
+        assert isinstance(series, LifImageSeries)
+        assert len(series) == 1
+
+        im = series[0]
+        str(im)
+        assert isinstance(im, LifImage)
+        assert series[im.path] is im
+        assert series[im.name + '$'] is im
+        assert im.parent.parent is xlef
+        assert im.parent.type == LifFileType.XLIF
+        assert im.parent.name == 'XYZCST'
+        assert len(im.parent.children) == 0
+        assert im.name == 'XYZCST'
+        assert im.path == 'XYZCST'
+        assert im.uuid == '5ec11c49-59bf-11ec-9875-a4bb6dd99fac'
+        assert len(im.xml_element) == 4
+        assert im.dtype == numpy.uint8
+        assert im.itemsize == 1
+        assert im.sizes == {
+            'T': 2,
+            'M': 4,
+            'C': 3,
+            'Z': 5,
+            'Y': 1200,
+            'X': 1600,
+        }
+        assert im.attrs['path'] == im.path
+        assert im.timestamps is not None
+        assert len(im.timestamps) == 120
+        assert im.size == 230400000
+        assert im.nbytes == 230400000
+        assert im.ndim == 6
+        assert isinstance(im.xml_element, ElementTree.Element)
+
+        assert im.tilescan is not None
+        assert not im.tilescan.flip_x
+        assert not im.tilescan.flip_y
+        assert not im.tilescan.swap_xy
+        assert len(im.tilescan) == len(im.coords['M'])
+        for m in im.coords['M']:
+            assert im.tilescan[m][-1] == im.tilescan.tiles[m]['pos_x']
+            assert im.tilescan['pos_z'][m] == im.tilescan.tiles['pos_z'][m]
+
+        data = im.asarray()
+        assert isinstance(data, numpy.ndarray)
+        checksum = data.sum(dtype=numpy.uint64, axis=(0, 1, 3, 4, 5)).tolist()
+        assert checksum == [2704560639, 2603036403, 2544171284]
+
+        assert im.memory_block.type == LifMemoryBlockType.LOF
+        assert im._lof_reference is not None
+        assert not im._lof_reference.filehandle.closed
 
         _assert_frames(im, data)
 
@@ -1759,7 +1852,7 @@ def test_lifext():
         assert 'C' not in im.coords
         assert_allclose(im.coords['Z'][[0, -1]], [0.0, 7.19784e-05])
         assert im.attrs['path'] != im.parent.name + '/' + im.path
-        assert len(im.timestamps) == 0
+        assert im.timestamps is None
         assert im.size == 4800000
         assert im.nbytes == 4800000
         assert im.ndim == 5
@@ -2331,7 +2424,7 @@ def test_flim(name):
         assert flim.frequency == 19.505
         assert not flim.is_bidirectional
         assert not flim.is_sinusoidal
-        assert len(flim.timestamps) == 0
+        assert flim.timestamps is None
         if name == 'XLEF_TIF/FLIM_testdata.xlef':
             # TIFF file is actually a LOF file
             with pytest.raises(RuntimeError):
@@ -2471,7 +2564,7 @@ def test_flim_nd(name):
         assert flim.frequency == 78.02
         assert flim.is_bidirectional
         assert not flim.is_sinusoidal
-        assert len(flim.timestamps) == 0
+        assert flim.timestamps is None
         assert len(flim.memory_block.read()) == 1004310116
         with pytest.raises(NotImplementedError):
             flim.asxarray()
@@ -2526,7 +2619,7 @@ def test_flim_lof():
         assert flim.frequency == 78.02
         assert not flim.is_bidirectional
         assert not flim.is_sinusoidal
-        assert len(flim.timestamps) == 0
+        assert flim.timestamps is None
         assert len(flim.memory_block.read()) == 1538370
         with pytest.raises(NotImplementedError):
             flim.asxarray()
