@@ -12,7 +12,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.15
+:Version: 2026.2.16
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -38,13 +38,20 @@ This revision was tested with the following requirements and dependencies
 - `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.2.16
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
 
 Revisions
 ---------
+
+2026.2.16
+
+- Change timestamps to None if not present (breaking).
+- Fix inefficient timestamp parsing.
+- Fix inefficient LifFile.close().
+- Add tilescan property to LifImage.
 
 2026.2.15
 
@@ -94,46 +101,6 @@ Revisions
 - Support stride-aligned RGB images.
 
 2025.2.20
-
-- Rename LifFileFormat to LifFileType (breaking).
-- Rename LifFile.format to LifFile.type (breaking).
-
-2025.2.10
-
-- Support case-sensitive file systems.
-- Support OMETiffBlock, AiviaTiffBlock, and other memory blocks.
-- Remove LifImageSeries.items and paths methods (breaking).
-- Deprecate LifImage.xml_element_smd.
-- Fix LifImage.parent_image and child_images properties for XML files.
-- Work around reading float16 blocks from uint16 OME-TIFF files.
-
-2025.2.8
-
-- Support LIFEXT files.
-- Remove asrgb parameter from LifImage.asarray (breaking).
-- Do not apply BGR correction when using memory block frames.
-- Avoid copying single frame to output array.
-- Add LifImage.parent_image and child_images properties.
-- Add LifImageSeries.find method.
-
-2025.2.6
-
-- Support XLEF and XLCF files.
-- Rename LifFile.series property to images (breaking).
-- Rename imread series argument to image (breaking).
-- Remove LifImage.index property (breaking).
-- Add parent and children properties to LifFile.
-- Improve detection of XML codecs.
-- Do not keep XML files open.
-
-2025.2.5
-
-- Support XLIF files.
-- Revise LifMemoryBlock (breaking).
-- Replace LifImage.is_lof property with format (breaking).
-- Require imagecodecs for decoding TIF, JPEG, PNG, and BMP frames.
-
-2025.2.2
 
 - …
 
