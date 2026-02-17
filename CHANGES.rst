@@ -1,6 +1,13 @@
 Revisions
 ---------
 
+2026.2.16
+
+- Change timestamps to None if not present (breaking).
+- Fix inefficient timestamp parsing.
+- Fix inefficient LifFile.close().
+- Add tilescan property to LifImage.
+
 2026.2.15
 
 - Add experimental frame-based interface to LifImage.
