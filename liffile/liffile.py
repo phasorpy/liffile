@@ -39,7 +39,7 @@ collections of images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.2.15
+:Version: 2026.2.16
 :DOI: `10.5281/zenodo.14740657 <https://doi.org/10.5281/zenodo.14740657>`_
 
 Quickstart
@@ -65,13 +65,20 @@ This revision was tested with the following requirements and dependencies
 - `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.1.14
   (required for decoding TIFF, JPEG, PNG, and BMP)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.1.28
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.2.16
   (required for reading multi-page TIFF)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
 
 Revisions
 ---------
+
+2026.2.16
+
+- Change timestamps to None if not present (breaking).
+- Fix inefficient timestamp parsing.
+- Fix inefficient LifFile.close().
+- Add tilescan property to LifImage.
 
 2026.2.15
 
@@ -121,46 +128,6 @@ Revisions
 - Support stride-aligned RGB images.
 
 2025.2.20
-
-- Rename LifFileFormat to LifFileType (breaking).
-- Rename LifFile.format to LifFile.type (breaking).
-
-2025.2.10
-
-- Support case-sensitive file systems.
-- Support OMETiffBlock, AiviaTiffBlock, and other memory blocks.
-- Remove LifImageSeries.items and paths methods (breaking).
-- Deprecate LifImage.xml_element_smd.
-- Fix LifImage.parent_image and child_images properties for XML files.
-- Work around reading float16 blocks from uint16 OME-TIFF files.
-
-2025.2.8
-
-- Support LIFEXT files.
-- Remove asrgb parameter from LifImage.asarray (breaking).
-- Do not apply BGR correction when using memory block frames.
-- Avoid copying single frame to output array.
-- Add LifImage.parent_image and child_images properties.
-- Add LifImageSeries.find method.
-
-2025.2.6
-
-- Support XLEF and XLCF files.
-- Rename LifFile.series property to images (breaking).
-- Rename imread series argument to image (breaking).
-- Remove LifImage.index property (breaking).
-- Add parent and children properties to LifFile.
-- Improve detection of XML codecs.
-- Do not keep XML files open.
-
-2025.2.5
-
-- Support XLIF files.
-- Revise LifMemoryBlock (breaking).
-- Replace LifImage.is_lof property with format (breaking).
-- Require imagecodecs for decoding TIF, JPEG, PNG, and BMP frames.
-
-2025.2.2
 
 - …
 
@@ -247,7 +214,7 @@ View image and metadata in a LIF file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.2.15'
+__version__ = '2026.2.16'
 
 __all__ = [
     'FILE_EXTENSIONS',
@@ -261,6 +228,7 @@ __all__ = [
     'LifImageSeries',
     'LifMemoryBlock',
     'LifMemoryBlockType',
+    'LifTileScanInfo',
     '__version__',
     'imread',
     'xml2dict',
@@ -640,6 +608,7 @@ class LifFile(BinaryFile):
     _squeeze: bool  # remove dimensions of length one from images
     _xml_header: tuple[int, int]  # byte offset and size of XML header
     _parent: LifFile | None  # parent file, if any
+    _open_files: list[LifFile | TiffFile]  # files to close
 
     def __init__(
         self,
@@ -654,6 +623,7 @@ class LifFile(BinaryFile):
 
         self._parent = _parent
         self._squeeze = bool(squeeze)
+        self._open_files = []
         self.type = LifFileType.LIF
         self.version = 0
         self.uuid = None
@@ -878,16 +848,10 @@ class LifFile(BinaryFile):
         if self._close:
             for child in self.children:
                 child.close()
-        # close cached LOF and TIFF references in images
-        if hasattr(self, 'images'):
-            for image in self.images:
-                if isinstance(image, LifImage):
-                    if image._lof_reference is not None:
-                        with contextlib.suppress(Exception):
-                            image._lof_reference.close()
-                    if image._tif_reference is not None:
-                        with contextlib.suppress(Exception):
-                            image._tif_reference.close()
+        for ref in self._open_files:
+            with contextlib.suppress(Exception):
+                ref.close()
+        self._open_files.clear()
         super().close()
 
     def __enter__(self) -> LifFile:
@@ -1067,7 +1031,9 @@ class LifImageABC(ABC):
             return parent.images.find(f'^{dirname}$')
 
         # LIFEXT root image references image in parent LIF file
-        # via MemoryBlockID
+        # via MemoryBlockID.
+        # The lookup is inefficient but maintaining a reverse mapping
+        # of MemoryBlockID to image is not worth for this case only.
         if self.parent.parent is None:
             return None
         for image in self.parent.parent.images:
@@ -1107,9 +1073,14 @@ class LifImageABC(ABC):
         return self.parent.memory_blocks[mbid]
 
     @property
-    def timestamps(self) -> NDArray[numpy.datetime64]:
-        """Time stamps of frames from TimeStampList XML element."""
-        return numpy.asarray([], dtype=numpy.datetime64)
+    def timestamps(self) -> NDArray[numpy.datetime64] | None:
+        """Time stamps of frames from TimeStampList XML element, if any."""
+        return None
+
+    @property
+    def tilescan(self) -> LifTileScanInfo | None:
+        """Tile scan information from TileScanInfo XML element, if any."""
+        return None
 
     @abstractmethod
     def asarray(
@@ -1316,7 +1287,9 @@ class LifImage(LifImageABC):
             path = os.path.join(self.parent.dirname, memblock.frames[0].file)
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
-            return LifFile(path, squeeze=self.parent._squeeze)
+            lof = LifFile(path, squeeze=self.parent._squeeze)
+            self.parent._open_files.append(lof)
+            return lof
         return None
 
     @cached_property
@@ -1332,7 +1305,9 @@ class LifImage(LifImageABC):
             path = os.path.join(self.parent.dirname, memblock.frames[0].file)
             if not os.path.exists(path):
                 path = case_sensitive_path(path)
-            return TiffFile(path)
+            tif = TiffFile(path)
+            self.parent._open_files.append(tif)
+            return tif
         return None
 
     @cached_property
@@ -1424,12 +1399,15 @@ class LifImage(LifImageABC):
                 continue
             if dim.length == 0 and dim.number_elements > 1:
                 continue
-            coords[dim.label] = numpy.linspace(
+            coord = numpy.linspace(
                 dim.origin,
                 dim.origin + dim.length,
                 dim.number_elements,
                 endpoint=True,
             )
+            if dim.label in {'M', 'N'}:
+                coord = numpy.astype(coord, numpy.intp)
+            coords[dim.label] = coord
         return coords
 
     @cached_property
@@ -1449,24 +1427,26 @@ class LifImage(LifImageABC):
         )
         return attrs
 
-    @property
-    def timestamps(self) -> NDArray[numpy.datetime64]:
+    @cached_property
+    def timestamps(self) -> NDArray[numpy.datetime64] | None:
         timestamp = self.xml_element.find('./Data/Image/TimeStampList')
         if timestamp is None:
-            return numpy.asarray([], dtype=numpy.datetime64)
+            return None
         timestamps: Any
         if timestamp.find('./TimeStamp') is not None:
             # LAS < 3.1
-            text = ElementTree.tostring(timestamp).decode()
-            high_integers = ' '.join(re.findall(r'HighInteger="(\d+)"', text))
-            low_integers = ' '.join(re.findall(r'LowInteger="(\d+)"', text))
-            timestamps = numpy.fromstring(
-                high_integers, dtype=numpy.uint64, sep=' '
+            timestamp_elements = timestamp.findall('./TimeStamp')
+            high_integers = numpy.empty(
+                len(timestamp_elements), dtype=numpy.uint64
             )
-            timestamps <<= 32
-            timestamps += numpy.fromstring(
-                low_integers, dtype=numpy.uint32, sep=' '
+            low_integers = numpy.empty(
+                len(timestamp_elements), dtype=numpy.uint32
             )
+            for i, ts in enumerate(timestamp_elements):
+                high_integers[i] = int(ts.attrib['HighInteger'])
+                low_integers[i] = int(ts.attrib['LowInteger'])
+            timestamps = high_integers << 32
+            timestamps += low_integers
         elif timestamp.text is not None:
             # LAS >= 3.1
             timestamps = numpy.fromiter(
@@ -1474,12 +1454,50 @@ class LifImage(LifImageABC):
                 dtype=numpy.uint64,
             )
         else:
-            return numpy.asarray([], dtype=numpy.datetime64)
+            return None
         # FILETIME to POSIX
         timestamps -= 116444736000000000
         timestamps //= 10000
         return timestamps.astype(  # type: ignore[no-any-return]
             'datetime64[ms]'
+        )
+
+    @cached_property
+    def tilescan(self) -> LifTileScanInfo | None:
+        tilescaninfo = self.xml_element.find(
+            './Data/Image/Attachment[@Name="TileScanInfo"]'
+        )
+        if tilescaninfo is None:
+            return None
+        tiles = tilescaninfo.findall('./Tile')
+        if not tiles:
+            return None
+        data = numpy.zeros(
+            len(tiles),
+            dtype=numpy.dtype(
+                [
+                    ('field_y', numpy.int32),
+                    ('field_x', numpy.int32),
+                    ('pos_z', numpy.float64),
+                    ('pos_y', numpy.float64),
+                    ('pos_x', numpy.float64),
+                ]
+            ),
+        )
+        for i, tile in enumerate(tiles):
+            attr = tile.attrib
+            data[i] = (
+                int(attr.get('FieldY', '0')),
+                int(attr.get('FieldX', '0')),
+                float(attr.get('PosZ', '0')),
+                float(attr.get('PosY', '0')),
+                float(attr.get('PosX', '0')),
+            )
+        return LifTileScanInfo(
+            bool(int(tilescaninfo.attrib.get('FlipX', '0'))),
+            bool(int(tilescaninfo.attrib.get('FlipY', '0'))),
+            bool(int(tilescaninfo.attrib.get('SwapXY', '0'))),
+            data,
         )
 
     def frame(
@@ -1491,7 +1509,7 @@ class LifImage(LifImageABC):
         """Return single frame from image.
 
         A frame consists of the innermost two contiguous dimensions
-        (typically Y, X) and an optional sample dimension (S for RGB).
+        (typically Y and X) and an optional sample dimension (S for RGB).
 
         Parameters:
             out:
@@ -1523,18 +1541,9 @@ class LifImage(LifImageABC):
     def frames(self) -> LifImageFrames:
         """Interface for accessing individual image frames.
 
-        Returns a :py:class:`LifImageFrames` object that provides
-        memory-efficient, frame-level access to image data.
-
-        A frame consists of the innermost two contiguous dimensions
-        (typically Y, X) and an optional sample dimension (S for RGB).
-        This allows iteration over higher dimensional data one 2D slice
-        at a time without loading the entire image into memory.
-
-        Returns:
-            :
-                LifImageFrames instance for accessing individual frames
-                or creating frame selections.
+        The :py:class:`LifImageFrames` instance provides a mapping and
+        sequence-like interface for memory-efficient, frame-level access
+        to higher dimensional image data with per-dimension selection.
 
         Examples:
             Access single frame using global indices::
@@ -1579,7 +1588,7 @@ class LifImage(LifImageABC):
             :
                 Image data as numpy array. RGB samples may not be contiguous.
 
-        Note:
+        Notes:
             For advanced use cases, use the :py:attr:`frames` interface,
             which supports per-dimension selections, heterogeneous channel
             data types, and discontiguous storage.
@@ -1764,16 +1773,16 @@ class LifFlimImage(LifImageABC):
 
 @final
 class LifImageFrames:
-    """Frame-based access interface for LifImage.
+    """Interface for accessing individual image frames in LifImage.
 
-    A mapping and sequence-like interface providing frame-level access
-    to image data.
-    Usually obtained via the :py:attr:`LifImage.frames` property.
+    A mapping and sequence-like interface providing memory-efficient,
+    frame-level access to higher dimensional image data with per-dimension
+    selection.
 
-    A frame consists of the innermost two contiguous dimensions
+    A frame consists of the innermost two contiguous dimensions of the image
     (typically Y and X) and an optional sample dimension (S for RGB).
-    This allows memory-efficient iteration over higher-dimensional
-    data one 2D slice at a time.
+
+    Instances are usually obtained via the :py:attr:`LifImage.frames` property.
 
     Parameters:
         image:
@@ -2088,7 +2097,7 @@ class LifImageFrames:
         #     dims = list(image.sizes.keys())
         #     frame_dims = dims[-3:] if dims[-1] == 'S' else dims[-2:]
         #
-        # However, this elaborate logic ensures correctness for:
+        # However, this implementation ensures correctness for:
         #
         # * XLIF files referencing external data
         # * Stride-aligned images
@@ -2579,7 +2588,7 @@ class LifImageFrames:
         return f'<LifImageFrames {self._image.name!r} {frame_shape}>'
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, frozen=True)
 class LifImageFramesInfo:
     """Internal information for LifImageFrames."""
 
@@ -3138,7 +3147,7 @@ class LifMemoryFrame:
         )
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class LifChannel:
     """Attributes of Image/ChannelDescription XML element."""
 
@@ -3179,7 +3188,7 @@ class LifChannel:
     """Bit distance."""
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class LifDimension:
     """Attributes of Image/DimensionDescription XML element."""
 
@@ -3208,7 +3217,7 @@ class LifDimension:
     """Bit distance."""
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class LifRawData:
     """Attributes of SingleMoleculeDetection/Dataset/RawData XML element."""
 
@@ -3241,6 +3250,31 @@ class LifRawData:
 
     sequential_mode: bool
     """Sequential mode."""
+
+
+@dataclass(slots=True, frozen=True)
+class LifTileScanInfo:
+    """Tile scan information from TileScanInfo XML element."""
+
+    flip_x: bool
+    """X stage direction is flipped."""
+
+    flip_y: bool
+    """Y stage direction is flipped."""
+
+    swap_xy: bool
+    """XY dimensions are swapped."""
+
+    tiles: NDArray[numpy.void]
+    """Tile indices and positions: field_y, field_x, pos_z, pos_y, pos_x."""
+
+    def __len__(self) -> int:
+        """Return number of tiles."""
+        return len(self.tiles)
+
+    def __getitem__(self, key: int | str) -> NDArray[Any]:
+        """Return field indices and positions."""
+        return self.tiles[key]
 
 
 if imagecodecs is not None:
